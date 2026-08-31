@@ -1,0 +1,17 @@
+# SSH Defense Gateway - Default Configuration
+# All thresholds and behavior for the intrusion defender.
+
+# Maximum failed login attempts before a source IP is flagged.
+max_attempts: 5
+
+# Time window (seconds) in which failed attempts are counted.
+time_window_seconds: 300
+
+# How long (minutes) a flagged IP is blocked.
+block_duration_minutes: 15
+
+# Commands considered suspicious when observed during a session.
+suspicious_commands:
+  - sudo
+  - apt
+  - python3
