@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 
 import pytest
@@ -37,16 +38,26 @@ def test_parse_failure_extracts_ip(auth_log):
 
 
 def test_tail_log_yields_live_appended_lines(auth_log):
-    gen = tail_log(str(auth_log))
-    next(gen)
-    with open(auth_log, "a") as f:
-        f.write("Mar  1 10:00:04 hostname sshd[1237]: Failed password for user alice from 203.0.113.5 port 22 ssh2\n")
-        f.flush()
-        os.fsync(f.fileno())
+    def writer():
+        time.sleep(0.2)
+        with open(auth_log, "a") as f:
+            f.write(
+                "Mar  1 10:00:04 hostname sshd[1237]: Failed password for "
+                "user alice from 203.0.113.5 port 22 ssh2\n"
+            )
+            f.flush()
+            os.fsync(f.fileno())
+
+    t = threading.Thread(target=writer)
+    t.start()
+
     received = []
-    for line in gen:
+    deadline = time.monotonic() + 5
+    for line in tail_log(str(auth_log)):
         if "203.0.113.5" in line:
             received.append(line)
-        if received:
             break
+        if time.monotonic() > deadline:
+            break
+    t.join()
     assert any("203.0.113.5" in line for line in received)
