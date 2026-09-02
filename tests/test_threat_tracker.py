@@ -44,10 +44,10 @@ def test_expired_events_are_purged_after_window():
 
     assert tracker.failure_count("192.168.1.10") == 3
 
-    clock.advance(500)  # t=1700, first two are beyond 300s window
-    assert tracker.failure_count("192.168.1.10") == 1
+    clock.advance(100)  # t=1300, first event at 1000 is expired
+    assert tracker.failure_count("192.168.1.10") == 2
 
-    clock.advance(250)  # t=1950, last event at 1200 also expired
+    clock.advance(200)  # t=1500, events at 1100 and 1200 now expired
     assert tracker.failure_count("192.168.1.10") == 0
 
 
