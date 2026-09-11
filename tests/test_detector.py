@@ -17,6 +17,16 @@ CLIENT_IP = "10.0.0.66"
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
 
 
+class FakeFirewall:
+    """Minimal firewall stand-in that just records whatever it blocks."""
+
+    def __init__(self):
+        self.blocked_ips = []
+
+    def apply_block(self, ip):
+        self.blocked_ips.append(ip)
+
+
 @pytest.fixture
 def live_session():
     env = dict(os.environ)
@@ -92,3 +102,91 @@ def test_detector_blocks_flagged_ip_on_firewall_chain(live_session, firewall):
     score = detector.evaluate(session)
     assert score >= 1
     assert firewall.rule_exists(CLIENT_IP) is True
+
+
+def test_score_process_counts_distinct_suspicious_tokens():
+    detector = BehaviorDetector(suspicious_commands=["sudo", "apt"])
+    assert detector.score_process("apt update") == 1
+    assert detector.score_process("sudo apt update") == 2
+    assert detector.score_process("ls -la") == 0
+
+
+def test_score_session_sums_across_processes():
+    detector = BehaviorDetector(suspicious_commands=["sudo", "apt"])
+    session = {
+        "processes": [
+            {"command": "sudo apt update"},
+            {"command": "ls"},
+            {"command": "python3 not_carried_over.py"},
+        ]
+    }
+    assert detector.score_session(session) == 2
+
+
+def test_evaluate_returns_above_threshold_and_responds(monkeypatch):
+    killed = []
+    detector = BehaviorDetector(suspicious_commands=["sudo"], score_threshold=1)
+    detector._terminate = lambda pid: killed.append(pid)
+    score = detector.evaluate(
+        {"processes": [{"pid": 4242, "command": "sudo ls"}]}
+    )
+    assert score == 1
+    assert killed == [4242]
+
+
+def test_evaluate_is_a_noop_below_threshold():
+    detector = BehaviorDetector(suspicious_commands=["sudo"], score_threshold=5)
+    firewall = FakeFirewall()
+    detector._firewall = firewall
+    detector._terminate = lambda pid: (_ for _ in ()).throw(AssertionError())
+    score = detector.evaluate(
+        {"client_address": "10.0.0.9", "processes": [{"pid": 1, "command": "sudo ls"}]}
+    )
+    assert score == 1
+    assert detector.last_response is None
+    assert firewall.blocked_ips == []
+
+
+def test_terminate_never_targets_process_groups(monkeypatch):
+    # None, zero, and negative pids would make os.kill nuke a whole
+    # process group instead of one process — that must never happen.
+    calls = []
+    monkeypatch.setattr("ai.detector.os.kill", lambda pid, sig: calls.append(pid))
+    detector = BehaviorDetector()
+    assert detector._terminate(None) is False
+    assert detector._terminate(0) is False
+    assert detector._terminate(-5) is False
+    assert calls == []
+
+
+def test_terminate_treats_already_dead_process_as_handled(monkeypatch):
+    def already_gone(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr("ai.detector.os.kill", already_gone)
+    detector = BehaviorDetector()
+    assert detector._terminate(9999) is True
+
+
+def test_respond_blocks_ip_even_when_kill_is_denied(monkeypatch):
+    def denied(pid, sig):
+        raise PermissionError
+
+    monkeypatch.setattr("ai.detector.os.kill", denied)
+    firewall = FakeFirewall()
+    detector = BehaviorDetector(firewall=firewall)
+    result = detector.respond(
+        {
+            "client_address": "10.0.0.9",
+            "processes": [{"pid": 123, "command": "sudo x"}, {"pid": 456, "command": "apt x"}],
+        }
+    )
+    assert result["kills"] == [{"pid": 123, "killed": False}, {"pid": 456, "killed": False}]
+    assert result["blocked"] is True
+    assert firewall.blocked_ips == ["10.0.0.9"]
+
+
+def test_respond_summary_is_kept_on_last_response():
+    detector = BehaviorDetector()
+    result = detector.respond({"client_address": "10.0.0.9", "processes": []})
+    assert detector.last_response is result

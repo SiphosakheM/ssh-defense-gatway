@@ -25,6 +25,7 @@ class BehaviorDetector:
         )
         self._score_threshold = score_threshold
         self._firewall = firewall
+        self._last_response = None
 
     def score_process(self, command):
         """Return the number of distinct baseline tokens in a command."""
@@ -38,18 +39,52 @@ class BehaviorDetector:
             if process.get("command")
         )
 
+    @property
+    def last_response(self):
+        """The most recent mitigation summary, or None if never triggered."""
+        return self._last_response
+
     def _terminate(self, pid):
+        """Kill a single process, tolerating already-dead targets.
+
+        Guards against ``None`` and non-positive pids: those values make
+        ``os.kill`` target a whole process group rather than one process,
+        which could just as easily kill the daemon's own session. Returns
+        True when the process is gone, False when it could not be killed.
+        """
+        if not isinstance(pid, int) or pid <= 0:
+            return False
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            # Already exited on its own — nothing left to do, count as handled.
+            return True
+        except PermissionError:
+            # Not ours to kill; report instead of crashing the response loop.
+            return False
+        return True
 
     def respond(self, session):
-        """Terminate the session processes and block the source IP."""
-        for process in session.get("processes", []):
-            self._terminate(process.get("pid"))
+        """Terminate the session processes and block the source IP.
+
+        Every listed pid gets a kill attempt, but a single stubborn
+        process won't hold up the rest — the firewall block is always
+        attempted as long as we know the client address. Returns a short
+        summary dict and stores it on ``self.last_response``.
+        """
+        kills = [
+            {
+                "pid": process.get("pid"),
+                "killed": self._terminate(process.get("pid")),
+            }
+            for process in session.get("processes", [])
+        ]
+        blocked = False
         if self._firewall is not None and session.get("client_address"):
             self._firewall.apply_block(session["client_address"])
+            blocked = True
+        self._last_response = {"kills": kills, "blocked": blocked}
+        return self._last_response
 
     def evaluate(self, session):
         """Score a session, triggering the automated response on a spike."""
