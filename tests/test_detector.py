@@ -29,6 +29,7 @@ class FakeFirewall:
 
 @pytest.fixture
 def live_session():
+    """Spawn a real SSH-tagged process tree the detector must terminate."""
     env = dict(os.environ)
     env["SSH_CONNECTION"] = f"{CLIENT_IP} 51234 127.0.0.1 22"
     process = subprocess.Popen(
@@ -48,6 +49,7 @@ def live_session():
 
 @pytest.fixture
 def firewall():
+    """Provide a real iptables chain, skipping when root is unavailable."""
     fw = FirewallManager(chain="SSH_DEFENSE_TEST")
     try:
         fw.ensure_chain()
@@ -58,6 +60,7 @@ def firewall():
 
 
 def _capture_session(monitor, deadline=10):
+    """Poll telemetry until the flagged test client shows up, then return it."""
     start = time.monotonic()
     while time.monotonic() - start < deadline:
         telemetry = monitor.collect()
@@ -74,6 +77,7 @@ def _capture_session(monitor, deadline=10):
 
 
 def test_detector_kills_real_processes_when_threat_score_spikes(live_session):
+    """A scoring spike results in a real kill of the spawned process tree."""
     monitor = BehaviorMonitor()
     session = _capture_session(monitor)
 
@@ -90,6 +94,7 @@ def test_detector_kills_real_processes_when_threat_score_spikes(live_session):
 
 
 def test_detector_blocks_flagged_ip_on_firewall_chain(live_session, firewall):
+    """A flagged client IP ends up dropped on the real custom chain."""
     monitor = BehaviorMonitor()
     session = _capture_session(monitor)
 
@@ -105,6 +110,7 @@ def test_detector_blocks_flagged_ip_on_firewall_chain(live_session, firewall):
 
 
 def test_score_process_counts_distinct_suspicious_tokens():
+    """Score reflects how many distinct baseline tokens appear in a command."""
     detector = BehaviorDetector(suspicious_commands=["sudo", "apt"])
     assert detector.score_process("apt update") == 1
     assert detector.score_process("sudo apt update") == 2
@@ -112,6 +118,7 @@ def test_score_process_counts_distinct_suspicious_tokens():
 
 
 def test_score_session_sums_across_processes():
+    """The session score is the sum of every process's individual score."""
     detector = BehaviorDetector(suspicious_commands=["sudo", "apt"])
     session = {
         "processes": [
@@ -124,6 +131,7 @@ def test_score_session_sums_across_processes():
 
 
 def test_evaluate_returns_above_threshold_and_responds(monkeypatch):
+    """Scores at or above the threshold trigger the kill response."""
     killed = []
     detector = BehaviorDetector(suspicious_commands=["sudo"], score_threshold=1)
     detector._terminate = lambda pid: killed.append(pid)
@@ -135,6 +143,7 @@ def test_evaluate_returns_above_threshold_and_responds(monkeypatch):
 
 
 def test_evaluate_is_a_noop_below_threshold():
+    """Low-scoring sessions are left running and unblocked."""
     detector = BehaviorDetector(suspicious_commands=["sudo"], score_threshold=5)
     firewall = FakeFirewall()
     detector._firewall = firewall
@@ -148,8 +157,7 @@ def test_evaluate_is_a_noop_below_threshold():
 
 
 def test_terminate_never_targets_process_groups(monkeypatch):
-    # None, zero, and negative pids would make os.kill nuke a whole
-    # process group instead of one process — that must never happen.
+    """Bad pids never reach os.kill, preventing accidental group kills."""
     calls = []
     monkeypatch.setattr("ai.detector.os.kill", lambda pid, sig: calls.append(pid))
     detector = BehaviorDetector()
@@ -160,6 +168,7 @@ def test_terminate_never_targets_process_groups(monkeypatch):
 
 
 def test_terminate_treats_already_dead_process_as_handled(monkeypatch):
+    """A process that already exited counts as successfully terminated."""
     def already_gone(pid, sig):
         raise ProcessLookupError
 
@@ -169,6 +178,7 @@ def test_terminate_treats_already_dead_process_as_handled(monkeypatch):
 
 
 def test_respond_blocks_ip_even_when_kill_is_denied(monkeypatch):
+    """A failed kill does not stop the IP from being blocked at the firewall."""
     def denied(pid, sig):
         raise PermissionError
 
@@ -187,6 +197,7 @@ def test_respond_blocks_ip_even_when_kill_is_denied(monkeypatch):
 
 
 def test_respond_summary_is_kept_on_last_response():
+    """The latest mitigation summary is exposed via ``last_response``."""
     detector = BehaviorDetector()
     result = detector.respond({"client_address": "10.0.0.9", "processes": []})
     assert detector.last_response is result

@@ -9,17 +9,23 @@ from core.threat_tracker import ThreatTracker
 
 
 class Clock:
+    """Controllable fake clock for deterministic time-window tests."""
+
     def __init__(self, start=1000.0):
+        """Start the fake clock at the given timestamp."""
         self.now = start
 
     def __call__(self):
+        """Return the fake current time."""
         return self.now
 
     def advance(self, seconds):
+        """Move the fake clock forward by ``seconds``."""
         self.now += seconds
 
 
 def test_track_failures_per_ip_and_retrieve_counts():
+    """Failures are recorded per IP and retrievable with current counts."""
     clock = Clock()
     tracker = ThreatTracker(max_attempts=5, time_window_seconds=300, clock=clock)
 
@@ -33,6 +39,7 @@ def test_track_failures_per_ip_and_retrieve_counts():
 
 
 def test_expired_events_are_purged_after_window():
+    """Failures older than the window stop counting toward the total."""
     clock = Clock()
     tracker = ThreatTracker(max_attempts=5, time_window_seconds=300, clock=clock)
 
@@ -52,6 +59,7 @@ def test_expired_events_are_purged_after_window():
 
 
 def test_threshold_triggers_when_max_attempts_reached():
+    """An IP is flagged only once its failure count meets the threshold."""
     clock = Clock()
     tracker = ThreatTracker(max_attempts=3, time_window_seconds=300, clock=clock)
 
@@ -64,6 +72,7 @@ def test_threshold_triggers_when_max_attempts_reached():
 
 
 def test_threshold_resets_after_events_expire():
+    """Threat status clears once the window passes with no new failures."""
     clock = Clock()
     tracker = ThreatTracker(max_attempts=3, time_window_seconds=300, clock=clock)
 

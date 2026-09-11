@@ -47,6 +47,7 @@ def run_daemon(
 
 
 def main():
+    """Entry point that runs the defense daemon until interrupted."""
     try:
         run_daemon()
     except KeyboardInterrupt:

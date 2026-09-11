@@ -20,6 +20,7 @@ FAILURE_LINE = (
 
 @pytest.fixture
 def firewall():
+    """Provide a real iptables chain, skipping when root is unavailable."""
     fw = FirewallManager(chain=CHAIN)
     try:
         fw.ensure_chain()
@@ -31,6 +32,7 @@ def firewall():
 
 @pytest.fixture
 def env(firewall, tmp_path):
+    """Return temporary auth log and config paths for a daemon run."""
     log_path = tmp_path / "auth.log"
     log_path.write_text("")
     config_path = tmp_path / "config.yaml"
@@ -44,6 +46,7 @@ def env(firewall, tmp_path):
 
 
 def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
+    """The daemon drops traffic from an IP once failures hit the threshold."""
     log_path, config_path = env
     stop = threading.Event()
     thread = threading.Thread(

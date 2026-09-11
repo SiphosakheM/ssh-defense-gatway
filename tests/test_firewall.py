@@ -15,6 +15,7 @@ TEST_IP = "203.0.113.7"
 
 @pytest.fixture
 def firewall():
+    """Provide a real iptables chain, skipping when root is unavailable."""
     fw = FirewallManager(chain=CHAIN)
     try:
         fw.ensure_chain()
@@ -25,6 +26,7 @@ def firewall():
 
 
 def test_apply_block_inserts_drop_rule_viewable_with_iptables_l(firewall):
+    """A DROP rule for the flagged IP appears on the custom chain."""
     firewall.apply_block(TEST_IP)
 
     proc = subprocess.run(
@@ -37,6 +39,7 @@ def test_apply_block_inserts_drop_rule_viewable_with_iptables_l(firewall):
 
 
 def test_block_rule_is_auto_removed_by_background_timer(firewall):
+    """The DROP rule expires on its own after the configured duration."""
     firewall.apply_block(TEST_IP)
     assert firewall.rule_exists(TEST_IP) is True
 

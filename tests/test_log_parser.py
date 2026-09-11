@@ -12,6 +12,7 @@ from core.log_parser import parse_failure, tail_log
 
 @pytest.fixture
 def auth_log(tmp_path):
+    """Create a temporary auth log seeded with sample sshd entries."""
     path = tmp_path / "auth.log"
     content = [
         "Mar  1 10:00:01 hostname sshd[1234]: Failed password for invalid user root from 192.168.1.10 port 22 ssh2",
@@ -25,6 +26,7 @@ def auth_log(tmp_path):
 
 
 def test_parse_failure_extracts_ip(auth_log):
+    """Known failure lines yield the correct username and source IP."""
     for line in auth_log.read_text().splitlines():
         parsed = parse_failure(line)
         if parsed is None:
@@ -38,6 +40,7 @@ def test_parse_failure_extracts_ip(auth_log):
 
 
 def test_tail_log_yields_live_appended_lines(auth_log):
+    """Newly appended log lines are surfaced by the tail generator."""
     def writer():
         time.sleep(0.2)
         with open(auth_log, "a") as f:

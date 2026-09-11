@@ -18,6 +18,7 @@ EXPECTED_KEYS = {
 
 @pytest.fixture
 def config_file():
+    """Create a temporary YAML config with default protection settings."""
     content = """\
 max_attempts: 5
 time_window_seconds: 300
@@ -36,11 +37,13 @@ suspicious_commands:
 
 
 def test_loader_returns_all_expected_keys(config_file):
+    """The loaded config contains every key the daemon depends on."""
     config = load_config(config_file)
     assert EXPECTED_KEYS.issubset(config.keys())
 
 
 def test_loader_populates_default_thresholds(config_file):
+    """Defaults from the sample config survive the load round-trip."""
     config = load_config(config_file)
     assert config["max_attempts"] == 5
     assert config["time_window_seconds"] == 300
@@ -49,5 +52,6 @@ def test_loader_populates_default_thresholds(config_file):
 
 
 def test_loader_handles_missing_file():
+    """A missing config path raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
         load_config("/tmp/does_not_exist_xyz.yaml")

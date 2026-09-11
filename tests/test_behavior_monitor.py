@@ -17,6 +17,7 @@ CLIENT_IP = "10.0.0.55"
 
 @pytest.fixture
 def live_shell():
+    """Spawn a real SSH-tagged shell that the monitor should capture."""
     env = dict(os.environ)
     env["SSH_CONNECTION"] = f"{CLIENT_IP} 51234 127.0.0.1 22"
     process = subprocess.Popen(
@@ -35,6 +36,7 @@ def live_shell():
 
 
 def _telemetry_with_shell(monitor, process, deadline=10):
+    """Poll telemetry until the tagged test shell shows up, then return it."""
     start = time.monotonic()
     while time.monotonic() - start < deadline:
         telemetry = monitor.collect()
@@ -46,6 +48,7 @@ def _telemetry_with_shell(monitor, process, deadline=10):
 
 
 def test_spawned_shell_and_command_captured_as_json_telemetry(live_shell):
+    """The live shell and its children surface as JSON-serializable telemetry."""
     monitor = BehaviorMonitor()
     telemetry, session = _telemetry_with_shell(monitor, live_shell)
 
@@ -74,6 +77,7 @@ def test_spawned_shell_and_command_captured_as_json_telemetry(live_shell):
 
 
 def test_session_disappears_from_telemetry_after_termination(live_shell):
+    """A killed session stops appearing in subsequent telemetry snapshots."""
     monitor = BehaviorMonitor()
     _telemetry_with_shell(monitor, live_shell)
 

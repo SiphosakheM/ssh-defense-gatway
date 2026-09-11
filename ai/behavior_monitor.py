@@ -47,6 +47,11 @@ class BehaviorMonitor:
         self._history = {}
 
     def _read_process(self, pid):
+        """Read a single /proc entry into a process dict.
+
+        Returns None when the process disappeared or is not readable,
+        which the scan loop treats as "not running" rather than an error.
+        """
         cmdline = _read_bytes(self._proc_root, pid, "cmdline")
         if cmdline is None:
             return None
@@ -109,6 +114,12 @@ class BehaviorMonitor:
         return processes
 
     def _group_sessions(self, processes):
+        """Organize processes into SSH sessions.
+
+        A session grows outward from every process carrying an
+        ``SSH_CONNECTION`` env var, collecting all descendants so the
+        detector later sees the full process tree of a connection.
+        """
         children = {}
         for process in processes:
             children.setdefault(process["ppid"], []).append(process["pid"])
@@ -153,6 +164,11 @@ class BehaviorMonitor:
         return sessions
 
     def _record_history(self, session, collected_at):
+        """Append newly observed commands to the user's command history.
+
+        Consecutive repeats of the same command are folded together and
+        the list is capped at ``MAX_HISTORY`` entries per user.
+        """
         history = self._history.setdefault(session["username"], [])
         for process in session["processes"]:
             if not process["command"]:
