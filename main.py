@@ -10,6 +10,7 @@ import threading
 from config.loader import load_config
 from core.firewall import FirewallManager
 from core.log_parser import parse_failure, tail_log
+from core.logger import AuditLogger
 from core.threat_tracker import ThreatTracker
 
 
@@ -18,6 +19,7 @@ def run_daemon(
     log_path="/var/log/auth.log",
     chain="SSH_DEFENSE",
     stop_event=None,
+    audit_log_path="logs/gateway_audit.log",
 ):
     """Run the defense loop until signaled.
 
@@ -29,7 +31,10 @@ def run_daemon(
         max_attempts=config["max_attempts"],
         time_window_seconds=config["time_window_seconds"],
     )
-    firewall = FirewallManager(chain=chain)
+    firewall = FirewallManager(
+        chain=chain,
+        logger=AuditLogger(audit_log_path),
+    )
     firewall.ensure_chain()
     block_seconds = config["block_duration_minutes"] * 60
 

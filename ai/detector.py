@@ -19,12 +19,14 @@ class BehaviorDetector:
         suspicious_commands=None,
         score_threshold=1,
         firewall=None,
+        logger=None,
     ):
         self._suspicious_commands = set(
             suspicious_commands or DEFAULT_SUSPICIOUS_COMMANDS
         )
         self._score_threshold = score_threshold
         self._firewall = firewall
+        self._logger = logger
         self._last_response = None
 
     def score_process(self, command):
@@ -70,15 +72,23 @@ class BehaviorDetector:
         Every listed pid gets a kill attempt, but a single stubborn
         process won't hold up the rest — the firewall block is always
         attempted as long as we know the client address. Returns a short
-        summary dict and stores it on ``self.last_response``.
+        summary dict and stores it on ``self.last_response``. Each
+        kill attempt is permanently recorded through the audit logger.
         """
-        kills = [
-            {
-                "pid": process.get("pid"),
-                "killed": self._terminate(process.get("pid")),
-            }
-            for process in session.get("processes", [])
-        ]
+        kills = []
+        for process in session.get("processes", []):
+            pid = process.get("pid")
+            killed = self._terminate(pid)
+            kills.append({"pid": pid, "killed": killed})
+            if self._logger is not None:
+                self._logger.record(
+                    "kill",
+                    pid=pid,
+                    command=process.get("command"),
+                    killed=killed,
+                    session_id=session.get("session_id"),
+                    client_address=session.get("client_address"),
+                )
         blocked = False
         if self._firewall is not None and session.get("client_address"):
             self._firewall.apply_block(session["client_address"])
@@ -91,4 +101,13 @@ class BehaviorDetector:
         score = self.score_session(session)
         if score >= self._score_threshold:
             self.respond(session)
+            if self._logger is not None:
+                self._logger.record(
+                    "anomaly",
+                    session_id=session.get("session_id"),
+                    client_address=session.get("client_address"),
+                    score=score,
+                    threshold=self._score_threshold,
+                    response=self._last_response,
+                )
         return score

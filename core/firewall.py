@@ -16,9 +16,10 @@ _RULE_RE = re.compile(r"^\s*DROP\s+all\s+--\s+(?P<source>\S+)\s")
 class FirewallManager:
     """Apply, inspect, and schedule removal of DROP rules on an iptables chain."""
 
-    def __init__(self, chain="SSH_DEFENSE_TEST", iptables_bin="iptables"):
+    def __init__(self, chain="SSH_DEFENSE_TEST", iptables_bin="iptables", logger=None):
         self.chain = chain
         self.iptables_bin = iptables_bin
+        self._logger = logger
 
     def _run(self, *args):
         return subprocess.run(
@@ -50,12 +51,24 @@ class FirewallManager:
         result = self._run("-I", self.chain, "1", "-s", ip, "-j", "DROP")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
+        if self._logger is not None:
+            self._logger.record(
+                "block",
+                ip=ip,
+                chain=self.chain,
+            )
 
     def remove_block(self, ip):
         """Delete the DROP rule for the source IP from the chain."""
         result = self._run("-D", self.chain, "-s", ip, "-j", "DROP")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
+        if self._logger is not None:
+            self._logger.record(
+                "unblock",
+                ip=ip,
+                chain=self.chain,
+            )
 
     def rule_exists(self, ip):
         """Return True if a DROP rule for the IP is listed on the chain.
