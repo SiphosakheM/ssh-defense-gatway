@@ -23,6 +23,7 @@ for post-login zero-trust security.
 | `ai/behavior_monitor.py` | Enumerates `/proc`, groups processes into SSH sessions. |
 | `ai/detector.py` | Scores sessions against a suspicious-command baseline and mitigates. |
 | `config/loader.py` | Loads and validates `config/config.yaml`. |
+| `core/logger.py` | Thread-safe append-only audit logger emitting JSON lines. |
 | `main.py` | Daemon tying log tailing, threat tracking, and blocking together. |
 
 ## Requirements
@@ -120,3 +121,27 @@ pgrep -fa "sleep 120|time.sleep\(120\)"     # expect nothing
 3. When the score meets the threshold, `respond()` kills every process in the
    session and calls `FirewallManager.apply_block()` on the client IP. The
    mitigation summary is available via the detector's `last_response`.
+
+## Audit logging
+
+Every active defense measure is permanently recorded as one JSON line in
+`logs/gateway_audit.log`:
+
+| Event | Source | Payload |
+| --- | --- | --- |
+| `block` | `FirewallManager.apply_block()` | `ip`, `chain` |
+| `unblock` | `FirewallManager.remove_block()` | `ip`, `chain` |
+| `kill` | `BehaviorDetector.respond()` | `pid`, `command`, `killed`, `session_id`, `client_address` |
+| `anomaly` | `BehaviorDetector.evaluate()` | `score`, `threshold`, `session_id`, `client_address`, `response` |
+
+Each entry is a flat JSON object with a UTC `timestamp` and an `event_type`,
+for example:
+
+```json
+{"chain": "SSH_DEFENSE", "event_type": "block", "ip": "203.0.113.9", "timestamp": "2026-09-12T13:45:01.123456+00:00"}
+```
+
+`AuditLogger` serializes writes behind a lock, opens the file in append mode,
+and `fsync`s every entry so concurrent writers (the daemon loop, background
+block-expiry timers, and the detector) can never garble a line and a recorded
+measure survives a crash. The log lives under `logs/` and is git-ignored.
