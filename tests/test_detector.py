@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -12,6 +13,15 @@ from ai.behavior_monitor import BehaviorMonitor
 from ai.detector import BehaviorDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
+from core.logger import AuditLogger
+
+
+def _read_entries(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+    except FileNotFoundError:
+        return []
 
 CLIENT_IP = "10.0.0.66"
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "config.yaml")
@@ -201,3 +211,87 @@ def test_respond_summary_is_kept_on_last_response():
     detector = BehaviorDetector()
     result = detector.respond({"client_address": "10.0.0.9", "processes": []})
     assert detector.last_response is result
+
+
+def test_respond_records_kill_event_per_process(tmp_path):
+    """Each killed connection writes its own structured kill audit entry."""
+    log_path = tmp_path / "audit.log"
+
+    def killed(pid):
+        return True
+
+    detector = BehaviorDetector(logger=AuditLogger(str(log_path)))
+    detector._terminate = killed
+    detector.respond(
+        {
+            "session_id": "ssh:10.0.0.9:1000",
+            "client_address": "10.0.0.9",
+            "processes": [
+                {"pid": 111, "command": "sudo x"},
+                {"pid": 222, "command": "apt y"},
+            ],
+        }
+    )
+
+    entries = _read_entries(log_path)
+    kills = [entry for entry in entries if entry["event_type"] == "kill"]
+    assert len(kills) == 2
+    assert kills[0] == {
+        "client_address": "10.0.0.9",
+        "command": "sudo x",
+        "event_type": "kill",
+        "killed": True,
+        "pid": 111,
+        "session_id": "ssh:10.0.0.9:1000",
+        "timestamp": kills[0]["timestamp"],
+    }
+    assert kills[1]["pid"] == 222
+
+
+def test_evaluate_records_anomaly_when_threshold_crossed(tmp_path):
+    """A scored anomaly is permanently recorded with score and response."""
+    log_path = tmp_path / "audit.log"
+    firewall = FakeFirewall()
+    detector = BehaviorDetector(
+        suspicious_commands=["sudo"],
+        score_threshold=1,
+        firewall=firewall,
+        logger=AuditLogger(str(log_path)),
+    )
+    detector._terminate = lambda pid: True
+
+    score = detector.evaluate(
+        {
+            "session_id": "ssh:10.0.0.9:1000",
+            "client_address": "10.0.0.9",
+            "processes": [{"pid": 111, "command": "sudo x"}],
+        }
+    )
+
+    assert score == 1
+    entries = _read_entries(log_path)
+    anomaly = [entry for entry in entries if entry["event_type"] == "anomaly"]
+    assert len(anomaly) == 1
+    assert anomaly[0]["score"] == 1
+    assert anomaly[0]["threshold"] == 1
+    assert anomaly[0]["session_id"] == "ssh:10.0.0.9:1000"
+    assert anomaly[0]["client_address"] == "10.0.0.9"
+    assert anomaly[0]["response"]["blocked"] is True
+    assert anomaly[0]["response"]["kills"] == [{"pid": 111, "killed": True}]
+
+
+def test_evaluate_below_threshold_writes_no_audit_entries(tmp_path):
+    """A harmless session must not produce any audit records."""
+    log_path = tmp_path / "audit.log"
+    detector = BehaviorDetector(
+        suspicious_commands=["sudo"],
+        score_threshold=5,
+        logger=AuditLogger(str(log_path)),
+    )
+    detector._terminate = lambda pid: (_ for _ in ()).throw(AssertionError())
+
+    detector.evaluate(
+        {"client_address": "10.0.0.9", "processes": [{"pid": 1, "command": "sudo ls"}]}
+    )
+
+    assert _read_entries(log_path) == []

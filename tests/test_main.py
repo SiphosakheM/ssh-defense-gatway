@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import threading
@@ -56,6 +57,7 @@ def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
             "log_path": str(log_path),
             "chain": CHAIN,
             "stop_event": stop,
+            "audit_log_path": str(log_path.parent / "audit.log"),
         },
         daemon=True,
     )
@@ -71,6 +73,12 @@ def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
     while not firewall.rule_exists(TEST_IP) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert firewall.rule_exists(TEST_IP) is True
+
+    with open(log_path.parent / "audit.log") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+    assert entries
+    assert entries[-1]["event_type"] == "block"
+    assert entries[-1]["ip"] == TEST_IP
 
     stop.set()
     with open(log_path, "a") as f:
