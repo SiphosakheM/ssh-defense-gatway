@@ -22,6 +22,7 @@ for post-login zero-trust security.
 | `core/firewall.py` | Creates a custom `iptables` chain, inserts/removes DROP rules. |
 | `ai/behavior_monitor.py` | Enumerates `/proc`, groups processes into SSH sessions. |
 | `ai/detector.py` | Scores sessions against a suspicious-command baseline and mitigates. |
+| `core/state_manager.py` | Holds the admin whitelist and protects listed IPs from response. |
 | `config/loader.py` | Loads and validates `config/config.yaml`. |
 | `core/logger.py` | Thread-safe append-only audit logger emitting JSON lines. |
 | `main.py` | Daemon tying log tailing, threat tracking, and blocking together. |
@@ -60,6 +61,7 @@ All thresholds live in `config/config.yaml`:
 | `time_window_seconds` | Rolling window in which failures are counted. | `300` |
 | `block_duration_minutes` | How long a flagged IP stays blocked. | `15` |
 | `suspicious_commands` | Binaries the behavioral detector scores against. | `sudo`, `apt`, `python3` |
+| `whitelist_ips` | IPs/CIDRs never blocked or terminated (failsafe). | `127.0.0.1`, `192.168.0.0/16` |
 
 The config file is validated on load: missing keys raise `ValueError` and a
 missing file raises `FileNotFoundError`.
@@ -121,6 +123,22 @@ pgrep -fa "sleep 120|time.sleep\(120\)"     # expect nothing
 3. When the score meets the threshold, `respond()` kills every process in the
    session and calls `FirewallManager.apply_block()` on the client IP. The
    mitigation summary is available via the detector's `last_response`.
+
+## Whitelist failsafe
+
+IP addresses or CIDR networks in `whitelist_ips` are exempt from every
+automated defense response, so a misconfiguration can never lock the
+operator out of their own machine:
+
+- The brute-force daemon checks `StateManager.is_whitelisted()` before
+  calling `FirewallManager.apply_block()` on any IP that crosses the
+  failure threshold.
+- The behavioral detector checks the same whitelist in `respond()` and
+  skips both the process kill and the firewall block for a whitelisted
+  client, recording the deferral as a `whitelisted` anomaly entry.
+
+`StateManager` accepts bare addresses (treated as `/32` hosts) and CIDR
+subnets; malformed entries raise `ValueError` at construction.
 
 ## Audit logging
 
