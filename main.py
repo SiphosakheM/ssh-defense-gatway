@@ -11,6 +11,7 @@ from config.loader import load_config
 from core.firewall import FirewallManager
 from core.log_parser import parse_failure, tail_log
 from core.logger import AuditLogger
+from core.state_manager import StateManager
 from core.threat_tracker import ThreatTracker
 
 
@@ -31,6 +32,7 @@ def run_daemon(
         max_attempts=config["max_attempts"],
         time_window_seconds=config["time_window_seconds"],
     )
+    state = StateManager(config["whitelist_ips"])
     firewall = FirewallManager(
         chain=chain,
         logger=AuditLogger(audit_log_path),
@@ -46,7 +48,11 @@ def run_daemon(
             continue
         ip = failure["ip"]
         tracker.record_failure(ip)
-        if tracker.is_threat(ip) and not firewall.rule_exists(ip):
+        if (
+            tracker.is_threat(ip)
+            and not firewall.rule_exists(ip)
+            and not state.is_whitelisted(ip)
+        ):
             firewall.apply_block(ip)
             firewall.schedule_block_removal(ip, block_seconds)
 

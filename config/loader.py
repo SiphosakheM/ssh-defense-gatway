@@ -13,6 +13,7 @@ EXPECTED_KEYS = {
     "time_window_seconds",
     "block_duration_minutes",
     "suspicious_commands",
+    "whitelist_ips",
 }
 
 

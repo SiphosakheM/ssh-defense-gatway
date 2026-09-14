@@ -15,3 +15,9 @@ suspicious_commands:
   - sudo
   - apt
   - python3
+
+# IP addresses or CIDR networks that must never be blocked or terminated,
+# so the defender cannot lock itself out during its own response.
+whitelist_ips:
+  - 127.0.0.1
+  - 192.168.0.0/16

@@ -20,6 +20,7 @@ class BehaviorDetector:
         score_threshold=1,
         firewall=None,
         logger=None,
+        whitelist=None,
     ):
         self._suspicious_commands = set(
             suspicious_commands or DEFAULT_SUSPICIOUS_COMMANDS
@@ -27,6 +28,7 @@ class BehaviorDetector:
         self._score_threshold = score_threshold
         self._firewall = firewall
         self._logger = logger
+        self._whitelist = whitelist
         self._last_response = None
 
     def score_process(self, command):
@@ -74,7 +76,25 @@ class BehaviorDetector:
         attempted as long as we know the client address. Returns a short
         summary dict and stores it on ``self.last_response``. Each
         kill attempt is permanently recorded through the audit logger.
+
+        A client listed in the administrator whitelist is never touched:
+        the response returns immediately with a ``whitelisted`` marker so
+        the operator cannot lock themselves out.
         """
+        client_address = session.get("client_address")
+        whitelisted = bool(
+            client_address
+            and self._whitelist is not None
+            and self._whitelist.is_whitelisted(client_address)
+        )
+        if whitelisted:
+            self._last_response = {
+                "kills": [],
+                "blocked": False,
+                "whitelisted": True,
+            }
+            return self._last_response
+
         kills = []
         for process in session.get("processes", []):
             pid = process.get("pid")
@@ -87,11 +107,11 @@ class BehaviorDetector:
                     command=process.get("command"),
                     killed=killed,
                     session_id=session.get("session_id"),
-                    client_address=session.get("client_address"),
+                    client_address=client_address,
                 )
         blocked = False
-        if self._firewall is not None and session.get("client_address"):
-            self._firewall.apply_block(session["client_address"])
+        if self._firewall is not None and client_address:
+            self._firewall.apply_block(client_address)
             blocked = True
         self._last_response = {"kills": kills, "blocked": blocked}
         return self._last_response
@@ -102,12 +122,14 @@ class BehaviorDetector:
         if score >= self._score_threshold:
             self.respond(session)
             if self._logger is not None:
+                response = self._last_response or {}
                 self._logger.record(
                     "anomaly",
                     session_id=session.get("session_id"),
                     client_address=session.get("client_address"),
                     score=score,
                     threshold=self._score_threshold,
-                    response=self._last_response,
+                    whitelisted=bool(response.get("whitelisted")),
+                    response=response,
                 )
         return score
