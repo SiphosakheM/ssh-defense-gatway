@@ -14,6 +14,7 @@ from ai.detector import BehaviorDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
 from core.logger import AuditLogger
+from core.state_manager import StateManager
 
 
 def _read_entries(path):
@@ -295,3 +296,39 @@ def test_evaluate_below_threshold_writes_no_audit_entries(tmp_path):
     )
 
     assert _read_entries(log_path) == []
+
+
+def test_whitelisted_client_is_never_terminated_or_blocked(tmp_path):
+    """A whitelisted admin session must skip both kill and firewall response."""
+    log_path = tmp_path / "audit.log"
+    firewall = FakeFirewall()
+    detector = BehaviorDetector(
+        suspicious_commands=["sudo"],
+        score_threshold=1,
+        firewall=firewall,
+        logger=AuditLogger(str(log_path)),
+        whitelist=StateManager(["10.0.0.9"]),
+    )
+    detector._terminate = lambda pid: (_ for _ in ()).throw(AssertionError())
+
+    score = detector.evaluate(
+        {
+            "session_id": "ssh:10.0.0.9:1000",
+            "client_address": "10.0.0.9",
+            "processes": [{"pid": 111, "command": "sudo x"}],
+        }
+    )
+
+    assert score == 1
+    assert detector.last_response == {
+        "kills": [],
+        "blocked": False,
+        "whitelisted": True,
+    }
+    assert firewall.blocked_ips == []
+    entries = _read_entries(log_path)
+    anomaly = [entry for entry in entries if entry["event_type"] == "anomaly"]
+    assert len(anomaly) == 1
+    assert anomaly[0]["client_address"] == "10.0.0.9"
+    assert anomaly[0]["whitelisted"] is True
+    assert anomaly[0]["response"]["whitelisted"] is True

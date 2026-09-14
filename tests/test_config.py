@@ -13,6 +13,7 @@ EXPECTED_KEYS = {
     "time_window_seconds",
     "block_duration_minutes",
     "suspicious_commands",
+    "whitelist_ips",
 }
 
 
@@ -27,6 +28,9 @@ suspicious_commands:
   - sudo
   - apt
   - python3
+whitelist_ips:
+  - 127.0.0.1
+  - 192.168.0.0/16
 """
     fd, path = tempfile.mkstemp(suffix=".yaml")
     os.close(fd)
@@ -49,6 +53,7 @@ def test_loader_populates_default_thresholds(config_file):
     assert config["time_window_seconds"] == 300
     assert config["block_duration_minutes"] == 15
     assert config["suspicious_commands"] == ["sudo", "apt", "python3"]
+    assert config["whitelist_ips"] == ["127.0.0.1", "192.168.0.0/16"]
 
 
 def test_loader_handles_missing_file():
