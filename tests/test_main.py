@@ -82,7 +82,7 @@ def env(firewall, tmp_path):
 class RecordingFirewall:
     """Stand-in firewall that records block requests instead of touching iptables."""
 
-    def __init__(self, chain=None, logger=None):
+    def __init__(self, chain=None, logger=None, state_store=None):
         self.blocked_ips = []
 
     def ensure_chain(self):
@@ -91,7 +91,7 @@ class RecordingFirewall:
     def rule_exists(self, ip):
         return False
 
-    def apply_block(self, ip):
+    def apply_block(self, ip, duration_seconds=None):
         self.blocked_ips.append(ip)
 
     def schedule_block_removal(self, ip, duration_seconds):
@@ -116,6 +116,7 @@ def test_daemon_bypasses_whitelisted_ip(tmp_path, monkeypatch):
             "chain": CHAIN,
             "stop_event": stop,
             "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(log_path.parent / "defense_state.json"),
         },
         daemon=True,
     )
@@ -158,6 +159,7 @@ def test_daemon_never_drops_whitelisted_ip(env, firewall, tmp_path):
             "chain": CHAIN,
             "stop_event": stop,
             "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(log_path.parent / "defense_state.json"),
         },
         daemon=True,
     )
@@ -186,6 +188,51 @@ def test_daemon_never_drops_whitelisted_ip(env, firewall, tmp_path):
     assert thread.is_alive() is False
 
 
+def test_daemon_reapplies_persisted_blocks_on_start(tmp_path, monkeypatch):
+    """Blocks found on disk at startup are restored onto the firewall."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    state_path = tmp_path / "defense_state.json"
+
+    from core.state_store import DefenseStateStore
+
+    DefenseStateStore(str(state_path)).record_block(
+        TEST_IP, expires_at=time.time() + 3600
+    )
+
+    recorder = RecordingFirewall()
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=main.run_daemon,
+        kwargs={
+            "config_path": str(config_path),
+            "log_path": str(log_path),
+            "chain": CHAIN,
+            "stop_event": stop,
+            "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(state_path),
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    deadline = time.monotonic() + 10
+    while TEST_IP not in recorder.blocked_ips and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert recorder.blocked_ips == [TEST_IP]
+
+    stop.set()
+    with open(log_path, "a") as f:
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
 def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
     """The daemon drops traffic from an IP once failures hit the threshold."""
     log_path, config_path = env
@@ -198,6 +245,7 @@ def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
             "chain": CHAIN,
             "stop_event": stop,
             "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(log_path.parent / "defense_state.json"),
         },
         daemon=True,
     )
