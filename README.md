@@ -23,6 +23,7 @@ for post-login zero-trust security.
 | `ai/behavior_monitor.py` | Enumerates `/proc`, groups processes into SSH sessions. |
 | `ai/detector.py` | Scores sessions against a suspicious-command baseline and mitigates. |
 | `core/state_manager.py` | Holds the admin whitelist and protects listed IPs from response. |
+| `core/state_store.py` | Mirrors active blocks to `logs/defense_state.json` for restart recovery. |
 | `config/loader.py` | Loads and validates `config/config.yaml`. |
 | `core/logger.py` | Thread-safe append-only audit logger emitting JSON lines. |
 | `main.py` | Daemon tying log tailing, threat tracking, and blocking together. |
@@ -163,3 +164,27 @@ for example:
 and `fsync`s every entry so concurrent writers (the daemon loop, background
 block-expiry timers, and the detector) can never garble a line and a recorded
 measure survives a crash. The log lives under `logs/` and is git-ignored.
+
+## Persistent threat state
+
+Every `apply_block` and `remove_block` on the firewall is mirrored into
+`logs/defense_state.json` through `core/state_store.py`, which stores each
+IP along with its `blocked_at` and `expires_at` timestamps:
+
+```json
+{
+  "blocks": {
+    "203.0.113.9": {
+      "blocked_at": 1789590866.35,
+      "expires_at": 1789594466.35
+    }
+  }
+}
+```
+
+Writes are atomic (temp file + `os.replace`) and lock-guarded, so concurrent
+block/expiry timers can never corrupt the file or leave a partial snapshot.
+On startup, `run_daemon` calls `state_store.load()`, prunes expired entries,
+and replays the surviving blocks onto the iptables chain — re-applying any
+missing DROP rules and rescheduling their removal — so active defenses
+survive a daemon restart or a full system reboot.
