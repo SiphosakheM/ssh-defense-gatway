@@ -9,6 +9,7 @@ manager can exercise actual network behaviour without touching the live
 import re
 import subprocess
 import threading
+import time
 
 _RULE_RE = re.compile(r"^\s*DROP\s+all\s+--\s+(?P<source>\S+)\s")
 
@@ -16,10 +17,17 @@ _RULE_RE = re.compile(r"^\s*DROP\s+all\s+--\s+(?P<source>\S+)\s")
 class FirewallManager:
     """Apply, inspect, and schedule removal of DROP rules on an iptables chain."""
 
-    def __init__(self, chain="SSH_DEFENSE_TEST", iptables_bin="iptables", logger=None):
+    def __init__(
+        self,
+        chain="SSH_DEFENSE_TEST",
+        iptables_bin="iptables",
+        logger=None,
+        state_store=None,
+    ):
         self.chain = chain
         self.iptables_bin = iptables_bin
         self._logger = logger
+        self._state_store = state_store
 
     def _run(self, *args):
         return subprocess.run(
@@ -46,8 +54,12 @@ class FirewallManager:
         self.flush_chain()
         self._run("-X", self.chain)
 
-    def apply_block(self, ip):
-        """Insert a DROP rule for the source IP at the top of the chain."""
+    def apply_block(self, ip, duration_seconds=None):
+        """Insert a DROP rule for the source IP at the top of the chain.
+
+        ``duration_seconds``, when given, records an expiry deadline in
+        the persistent state store so the block survives restarts.
+        """
         result = self._run("-I", self.chain, "1", "-s", ip, "-j", "DROP")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip())
@@ -57,6 +69,13 @@ class FirewallManager:
                 ip=ip,
                 chain=self.chain,
             )
+        if self._state_store is not None:
+            expires_at = (
+                None
+                if duration_seconds is None
+                else time.time() + duration_seconds
+            )
+            self._state_store.record_block(ip, expires_at=expires_at)
 
     def remove_block(self, ip):
         """Delete the DROP rule for the source IP from the chain."""
@@ -69,6 +88,8 @@ class FirewallManager:
                 ip=ip,
                 chain=self.chain,
             )
+        if self._state_store is not None:
+            self._state_store.record_unblock(ip)
 
     def rule_exists(self, ip):
         """Return True if a DROP rule for the IP is listed on the chain.

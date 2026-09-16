@@ -25,6 +25,7 @@ ENV/
 # Logs
 logs/*.log
 logs/*.out
+logs/defense_state.json
 *.log
 
 # Editor / OS
