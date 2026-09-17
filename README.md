@@ -52,6 +52,9 @@ pip install -r requirements.txt
 pip install -r requirements-dev.txt
 ```
 
+For a production deployment as a native systemd service, skip the manual venv
+steps and use `install.sh` (see below).
+
 ## Configuration
 
 All thresholds live in `config/config.yaml`:
@@ -77,6 +80,55 @@ sudo .venv/bin/python main.py
 
 The daemon tails `/var/log/auth.log` by default and applies DROP rules on the
 `SSH_DEFENSE` chain. `Ctrl+C` stops it cleanly.
+
+All runtime paths can be overridden via command-line flags, which the systemd
+unit relies on:
+
+| Flag | Default |
+| --- | --- |
+| `--config` | `config/config.yaml` |
+| `--auth-log` | `/var/log/auth.log` |
+| `--chain` | `SSH_DEFENSE` |
+| `--audit-log` | `logs/gateway_audit.log` |
+| `--state` | `logs/defense_state.json` |
+
+## Running as a native systemd service
+
+The repository ships a systemd unit template, `ssh-gateway.service`, and an
+`install.sh` that copies the application tree into production and registers the
+service:
+
+```bash
+sudo ./install.sh
+```
+
+By default the application lands in `/opt/ssh-defense-gateway`, the rendered
+unit goes into `/etc/systemd/system/ssh-gateway.service`, a virtualenv is
+built, and the service is enabled to start at boot:
+
+```bash
+sudo systemctl start ssh-gateway
+systemctl status ssh-gateway
+```
+
+`install.sh` honours a few environment overrides for non-standard installs:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `INSTALL_ROOT` | `/opt/ssh-defense-gateway` | Where the application tree is copied |
+| `SYSTEMD_DIR` | `/etc/systemd/system` | Where the rendered unit is installed |
+| `SKIP_VENV=1` | off | Skip venv creation / `pip install` |
+| `SKIP_SYSTEMD=1` | off | Skip `daemon-reload` and `enable` |
+
+A non-root invocation that targets the default `/etc/systemd/system` fails
+loudly; the test suite uses `SKIP_VENV`/`SKIP_SYSTEMD` and throwaway
+`INSTALL_ROOT`/`SYSTEMD_DIR` prefixes to exercise the installer without root or
+touching the live systemd manager.
+
+The unit runs the daemon with `WorkingDirectory=@INSTALL_ROOT@` and
+`ExecStart=@INSTALL_ROOT@/.venv/bin/python @INSTALL_ROOT@/main.py`, so all
+relative defaults (`config/config.yaml`, `logs/`) resolve inside the install
+tree. `Restart=on-failure` brings the daemon back up if it exits unexpectedly.
 
 ## Running the tests
 
