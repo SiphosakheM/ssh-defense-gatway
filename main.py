@@ -6,6 +6,7 @@ cross the configured threshold. Active blocks are mirrored to disk so
 they survive a restart or reboot.
 """
 
+import argparse
 import threading
 import time
 
@@ -73,10 +74,31 @@ def run_daemon(
             firewall.schedule_block_removal(ip, block_seconds)
 
 
-def main():
-    """Entry point that runs the defense daemon until interrupted."""
+def main(argv=None):
+    """Entry point that runs the defense daemon until interrupted.
+
+    Accepts the same paths as ``run_daemon`` so the process can be driven
+    directly from a systemd unit or a terminal.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ssh-gateway",
+        description="SSH Defense Gateway - active defense daemon",
+    )
+    parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument("--auth-log", default="/var/log/auth.log")
+    parser.add_argument("--chain", default="SSH_DEFENSE")
+    parser.add_argument("--audit-log", default="logs/gateway_audit.log")
+    parser.add_argument("--state", default="logs/defense_state.json")
+    args = parser.parse_args(argv)
+
     try:
-        run_daemon()
+        run_daemon(
+            config_path=args.config,
+            log_path=args.auth_log,
+            chain=args.chain,
+            audit_log_path=args.audit_log,
+            state_path=args.state,
+        )
     except KeyboardInterrupt:
         return
 

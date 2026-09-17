@@ -1,0 +1,20 @@
+# SSH Defense Gateway systemd unit.
+#
+# Template only: install.sh replaces @INSTALL_ROOT@ with the configured
+# install prefix before copying this file into the systemd unit directory.
+[Unit]
+Description=SSH Defense Gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Relative paths in config.yaml, the audit log, and the state file resolve
+# against this directory, matching the repository layout the daemon expects.
+WorkingDirectory=@INSTALL_ROOT@
+ExecStart=@INSTALL_ROOT@/.venv/bin/python @INSTALL_ROOT@/main.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
