@@ -22,6 +22,8 @@ for post-login zero-trust security.
 | `core/firewall.py` | Creates a custom `iptables` chain, inserts/removes DROP rules. |
 | `ai/behavior_monitor.py` | Enumerates `/proc`, groups processes into SSH sessions. |
 | `ai/detector.py` | Scores sessions against a suspicious-command baseline and mitigates. |
+| `ai/anomaly.py` | Pure-Python isolation forest: flags sessions that diverge from a user's own command baseline. |
+| `ai/ml_detector.py` | `AnomalyAwareDetector` — combines the rule score with the ML outlier score. |
 | `core/state_manager.py` | Holds the admin whitelist and protects listed IPs from response. |
 | `core/state_store.py` | Mirrors active blocks to `logs/defense_state.json` for restart recovery. |
 | `config/loader.py` | Loads and validates `config/config.yaml`. |
@@ -176,6 +178,37 @@ pgrep -fa "sleep 120|time.sleep\(120\)"     # expect nothing
 3. When the score meets the threshold, `respond()` kills every process in the
    session and calls `FirewallManager.apply_block()` on the client IP. The
    mitigation summary is available via the detector's `last_response`.
+
+### ML anomaly layer
+
+`AnomalyAwareDetector` (in `ai/ml_detector.py`) keeps everything above and
+adds a lightweight, dependency-free anomaly detector. Each session becomes a
+five-value feature vector — distinct command count, process count, mean
+tokens per command, novelty against the user's past commands, and rule-baseline
+hits — and a pure-Python isolation forest (`ai/anomaly.py`) scores it in
+[0, 1]. A session is now mitigated when either:
+
+- its classic rule score meets the threshold, **or**
+- the forest — trained on the user's own rolling command baseline — returns an
+  anomaly score at or above `anomaly_threshold`.
+
+The design is deliberately cheap for a live daemon: no third-party ML
+libraries, bounded per-user memory (`anomaly_max_memory`), tiny sub-sampled
+trees, and a lazy refit that only retrains after the baseline grows by
+`anomaly_retrain_every` sessions. A detected deviation is explained via the
+`last_assessment` dict, which lists the features that drove the score (the
+`why` field), and every ML-triggered mitigation still honours the whitelist
+failsafe and the JSON audit trail. All ML tuning keys are optional — the
+defaults below apply when the key is absent from `config/config.yaml`:
+
+| Key | Description | Default |
+| --- | --- | --- |
+| `anomaly_enabled` | Master switch for the ML layer. | `true` |
+| `anomaly_threshold` | Outlier score (0-1) required to respond. | `0.72` |
+| `anomaly_forest_trees` | Trees in the isolation forest. | `16` |
+| `anomaly_max_memory` | Rolling per-user feature vectors retained. | `150` |
+| `anomaly_min_train` | Sessions before the baseline is usable. | `25` |
+| `anomaly_retrain_every` | New sessions before the forest refits. | `24` |
 
 ## Whitelist failsafe
 
