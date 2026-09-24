@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Non-root: most of the suite. Root: additionally exercises the
+        # iptables block/kill integration tests that always skip otherwise.
+        privileged: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Create venv and install dependencies
+        run: make venv
+
+      - name: Run test suite (non-root)
+        if: ${{ !matrix.privileged }}
+        run: .venv/bin/pytest tests/ -v --timeout=300
+
+      - name: Run full suite (root)
+        if: ${{ matrix.privileged }}
+        run: sudo -E .venv/bin/pytest tests/ -v --timeout=300
+
+      - name: Verify environment is clean after root tests
+        if: ${{ matrix.privileged }}
+        run: |
+          ssh_defense_rules="$(sudo iptables -L -n | grep -c SSH_DEFENSE_TEST || true)"
+          test "$ssh_defense_rules" = "0"
+          ! pgrep -fa "sleep 120|time.sleep\(120\)"
