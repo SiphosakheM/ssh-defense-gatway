@@ -111,6 +111,32 @@ implementation, but its thresholds are placeholders:
   verifies the environment is clean (no leftover `SSH_DEFENSE_TEST` rules,
   no stray sleeping processes). The suite remains Linux-only by design.
 
+## 7. AI baseline training mode (LANDED)
+
+Issue #13: learn normal command patterns from live activity instead of
+relying only on the static `suspicious_commands` list.
+
+- `BaselineProfile` in `ai/detector.py` keeps per-user mean/std per feature
+  and scores live sessions with a per-feature z-score (standard deviation)
+  test; it persists atomically to a JSON model file.
+- `BehaviorDetector.train()` observes without responding;
+  `evaluate_baseline()` compares against the learned profile. Both the base
+  detector and `AnomalyAwareDetector` now honour the baseline as an extra
+  flag alongside the rule score and the isolation forest.
+- `main.py --train` (with `--baseline <path>`, default
+  `logs/behavior_baseline.json`) runs observation-only: it never kills or
+  touches the firewall, only learns and rewrites the model file. Normal
+  daemon mode loads that file and compares against it.
+- Optional config keys (not in `EXPECTED_KEYS`): `baseline_min_samples`
+  (default 5) and `baseline_z_threshold` (default 2.5).
+- Tests: unit coverage in `tests/test_detector.py`; the live integration
+  test `tests/test_main.py::test_daemon_training_mode_learns_baseline_from_live_shell`
+  spawns a real SSH-tagged shell, runs standard commands, and asserts the
+  model file updates while the shell survives (kill-switch bypassed).
+- Still open: tune `baseline_z_threshold`/`baseline_min_samples` against a
+  real workload, and optionally persist the seen-command vocabulary so
+  novelty can be part of the baseline too.
+
 ## Test reference
 
 ```bash
