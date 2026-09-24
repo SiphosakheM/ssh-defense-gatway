@@ -1,5 +1,8 @@
+import getpass
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -16,6 +19,7 @@ TEST_IP = "203.0.113.9"
 OTHER_IP = "198.51.100.7"
 BEHAVIOR_CLIENT_IP = "203.0.113.55"
 BEHAVIOR_PID = 314159265
+TRAIN_CLIENT_IP = "203.0.113.77"
 
 
 def _wait_until(predicate, deadline=10):
@@ -417,5 +421,81 @@ def test_daemon_blocks_ip_after_failure_threshold(env, firewall):
         f.write("\n")
         f.flush()
         os.fsync(f.fileno())
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+@pytest.fixture
+def live_training_shell():
+    """Spawn a real SSH-tagged shell running ordinary admin commands."""
+    env = dict(os.environ)
+    env["SSH_CONNECTION"] = f"{TRAIN_CLIENT_IP} 51234 127.0.0.1 22"
+    process = subprocess.Popen(
+        ["bash", "-c", "ls -la; pwd; whoami; sleep 120 & wait"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    yield process
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def _read_baseline(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def test_daemon_training_mode_learns_baseline_from_live_shell(
+    live_training_shell, tmp_path
+):
+    """--train observes real activity, persists the profile, and never kills."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path)
+    baseline_path = str(tmp_path / "behavior_baseline.json")
+
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=main.run_daemon,
+        kwargs={
+            "config_path": str(config_path),
+            "log_path": str(log_path),
+            "chain": CHAIN,
+            "stop_event": stop,
+            "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(log_path.parent / "defense_state.json"),
+            "train": True,
+            "baseline_path": baseline_path,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    user = getpass.getuser()
+
+    def learned_at_least_twice():
+        stats = _read_baseline(baseline_path).get("users", {}).get(user)
+        return stats is not None and stats.get("count", 0) >= 2
+
+    assert _wait_until(learned_at_least_twice, deadline=15)
+
+    payload = _read_baseline(baseline_path)
+    assert payload["version"] == 1
+    assert payload["users"][user]["count"] >= 2
+    assert len(payload["users"][user]["sums"]) == 5
+
+    # Kill-switch is bypassed: the observed shell is still alive.
+    assert live_training_shell.poll() is None
+
+    stop.set()
     thread.join(timeout=5)
     assert thread.is_alive() is False
