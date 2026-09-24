@@ -35,3 +35,7 @@ suspicious_commands:
 whitelist_ips:
   - 127.0.0.1
   - 192.168.0.0/16
+
+# Optional behavior-baseline knobs used by AI training mode (--train).
+# baseline_min_samples: 5     # per-user sessions before the profile yields a score
+# baseline_z_threshold: 2.5   # max |z| across features that flags a session

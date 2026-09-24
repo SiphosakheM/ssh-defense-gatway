@@ -9,6 +9,11 @@ A background behavioral scan also runs every
 ``behavior_scan_interval_seconds`` (default 30), feeding live session
 telemetry to the ``AnomalyAwareDetector`` so post-login zero-trust
 defense is active in production, not just in unit tests.
+
+Passing ``--train`` switches the process into observation-only training
+mode: it never kills a process, never touches the firewall, and only
+logs live session telemetry into the learner's baseline model file so a
+normal-command profile can be built from real user activity.
 """
 
 import argparse
@@ -16,6 +21,7 @@ import threading
 import time
 
 from ai.behavior_monitor import BehaviorMonitor
+from ai.detector import BaselineProfile, BehaviorDetector
 from ai.ml_detector import AnomalyAwareDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
@@ -26,6 +32,48 @@ from core.state_store import DefenseStateStore
 from core.threat_tracker import ThreatTracker
 
 
+def _run_training(config, baseline_path, stop_event):
+    """Learn the behavior baseline without killing anything or blocking IPs.
+
+    Training mode observes every live SSH session, folds its features into
+    a ``BaselineProfile``, and atomically persists the profile to
+    ``baseline_path`` whenever it changes so the model file grows as real
+    activity is seen. The firewall and kill-switch are never touched.
+    """
+    baseline = BaselineProfile.load(baseline_path)
+    baseline.min_samples = int(
+        config.get("baseline_min_samples", baseline.min_samples)
+    )
+    baseline.z_threshold = float(
+        config.get("baseline_z_threshold", baseline.z_threshold)
+    )
+    trainer = BehaviorDetector(
+        suspicious_commands=config.get("suspicious_commands"),
+        baseline=baseline,
+    )
+    monitor = BehaviorMonitor()
+    scan_interval = float(config.get("behavior_scan_interval_seconds", 30))
+
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            break
+        telemetry = monitor.collect()
+        updated = False
+        for session in telemetry.get("sessions", []):
+            if trainer.train(session) is not None:
+                updated = True
+        if updated:
+            baseline.save(baseline_path)
+
+        if scan_interval <= 0:
+            continue
+        deadline = time.monotonic() + scan_interval
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return
+            time.sleep(0.1)
+
+
 def run_daemon(
     config_path="config/config.yaml",
     log_path="/var/log/auth.log",
@@ -33,14 +81,22 @@ def run_daemon(
     stop_event=None,
     audit_log_path="logs/gateway_audit.log",
     state_path="logs/defense_state.json",
+    train=False,
+    baseline_path="logs/behavior_baseline.json",
 ):
     """Run the defense loop until signaled.
 
     ``stop_event`` is an optional ``threading.Event``; once set, the loop
     exits on the next line read from the tailed log. On startup, blocks
     recorded in ``state_path`` are restored onto the firewall.
+
+    With ``train=True`` the process enters observation-only training mode
+    and returns once the baseline profile has been learned.
     """
     config = load_config(config_path)
+    if train:
+        _run_training(config=config, baseline_path=baseline_path, stop_event=stop_event)
+        return
     tracker = ThreatTracker(
         max_attempts=config["max_attempts"],
         time_window_seconds=config["time_window_seconds"],
@@ -66,11 +122,13 @@ def run_daemon(
             firewall.schedule_block_removal(ip, remaining)
 
     monitor = BehaviorMonitor()
+    baseline = BaselineProfile.load(baseline_path)
     detector = AnomalyAwareDetector.from_config(
         config,
         firewall=firewall,
         logger=audit_logger,
         whitelist=state,
+        baseline=baseline,
     )
     scan_interval = float(config.get("behavior_scan_interval_seconds", 30))
 
@@ -132,6 +190,16 @@ def main(argv=None):
     parser.add_argument("--chain", default="SSH_DEFENSE")
     parser.add_argument("--audit-log", default="logs/gateway_audit.log")
     parser.add_argument("--state", default="logs/defense_state.json")
+    parser.add_argument(
+        "--train",
+        action="store_true",
+        help="observe live sessions and build the AI baseline without responding",
+    )
+    parser.add_argument(
+        "--baseline",
+        default="logs/behavior_baseline.json",
+        help="behavior baseline model file used by --train and the AI scan",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -141,6 +209,8 @@ def main(argv=None):
             chain=args.chain,
             audit_log_path=args.audit_log,
             state_path=args.state,
+            train=args.train,
+            baseline_path=args.baseline,
         )
     except KeyboardInterrupt:
         return
