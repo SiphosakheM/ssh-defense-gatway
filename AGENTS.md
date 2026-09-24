@@ -22,14 +22,14 @@ All five of the ML-scoped commits are on `main`:
 If this section is still open, resume from section 2 (daemon wiring). If all
 five commits exist, this entire section is done and can be dropped.
 
-## 2. Wire the AI defense into the daemon (highest priority)
+## 2. Wire the AI defense into the daemon (LANDED)
 
-`main.py` runs **only** the brute-force path. The entire behavioral/ML layer
+`main.py` now runs **only** the brute-force path. The entire behavioral/ML layer
 — `BehaviorMonitor`, `BehaviorDetector`, `AnomalyAwareDetector` — is built,
 unit-tested, and documented but never invoked by `run_daemon`, so the "AI
 defense" the README describes is not actually active in production.
 
-Missing work:
+Missing work (DONE — resumed below for reference, section is closed):
 
 - Add a behavioral scan loop to `run_daemon` (e.g. every N seconds) that:
   1. calls `BehaviorMonitor.collect()` for live sessions;
@@ -87,25 +87,29 @@ systemctl status ssh-gateway
 sudo systemctl restart ssh-gateway
 ```
 
-## 5. Harden and tune the ML model with real data
+## 5. Harden and tune the ML model with real data (PARTIALLY LANDED)
 
 The isolation forest is a correct, deterministic, dependency-free
 implementation, but its thresholds are placeholders:
 
 - `anomaly_threshold` (default `0.72`) and `anomaly_min_train`/memory sizing
   were validated against synthetic sessions only. Tune against real auth
-  workloads before trusting it in production.
-- The forest scores per-user command vectors; consider adding richer features
-  later (command entropy, session duration, network endpoints) — the
-  vectorizer lives in `ai/anomaly.py` (`FEATURE_NAMES`) and extending it means
-  updating the tests in `tests/test_anomaly.py`.
+  workloads before trusting it in production. (DONE once real data exists —
+  no real workload available in the dev environment.)
+- Richer features added: `command_entropy` (character-level Shannon entropy
+  of the session commands) is now a 6th feature in `ai/anomaly.py`
+  (`FEATURE_NAMES`) with tests in `tests/test_anomaly.py`. Still open: session
+  duration and network endpoints, which need new telemetry from
+  `ai/behavior_monitor.py`.
 
-## 6. CI / portability (nice-to-have)
+## 6. CI / portability (LANDED)
 
-- No CI pipeline exists; the suite is Linux-only by design (`/proc`,
-  `iptables`, systemd).
-- An optional `Makefile` or GitHub Actions matrix (non-root + root runner)
-  would let the root-only tests actually run in CI.
+- `Makefile` added with `venv`, `install`, `test` (non-root), `test-root`
+  (full suite via sudo), and `clean` targets.
+- `.github/workflows/ci.yml` runs the suite on a non-root + root matrix so the
+  previously-skipped iptables/systemd tests can actually run in CI, and
+  verifies the environment is clean (no leftover `SSH_DEFENSE_TEST` rules,
+  no stray sleeping processes). The suite remains Linux-only by design.
 
 ## Test reference
 
