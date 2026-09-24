@@ -4,12 +4,19 @@ Tails the SSH authentication log, records failed attempts in the threat
 tracker, and blocks offending IPs on a dedicated iptables chain once they
 cross the configured threshold. Active blocks are mirrored to disk so
 they survive a restart or reboot.
+
+A background behavioral scan also runs every
+``behavior_scan_interval_seconds`` (default 30), feeding live session
+telemetry to the ``AnomalyAwareDetector`` so post-login zero-trust
+defense is active in production, not just in unit tests.
 """
 
 import argparse
 import threading
 import time
 
+from ai.behavior_monitor import BehaviorMonitor
+from ai.ml_detector import AnomalyAwareDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
 from core.log_parser import parse_failure, tail_log
@@ -40,9 +47,10 @@ def run_daemon(
     )
     state = StateManager(config["whitelist_ips"])
     state_store = DefenseStateStore(state_path)
+    audit_logger = AuditLogger(audit_log_path)
     firewall = FirewallManager(
         chain=chain,
-        logger=AuditLogger(audit_log_path),
+        logger=audit_logger,
         state_store=state_store,
     )
     firewall.ensure_chain()
@@ -56,6 +64,39 @@ def run_daemon(
             firewall.apply_block(ip, duration_seconds=remaining)
         if remaining is not None and remaining > 0:
             firewall.schedule_block_removal(ip, remaining)
+
+    monitor = BehaviorMonitor()
+    detector = AnomalyAwareDetector.from_config(
+        config,
+        firewall=firewall,
+        logger=audit_logger,
+        whitelist=state,
+    )
+    scan_interval = float(config.get("behavior_scan_interval_seconds", 30))
+
+    def behavior_scan():
+        """Periodically score live sessions and respond to AI-flagged ones.
+
+        The whitelist failsafe and audit logging are honoured by the
+        detector itself, so every evaluated session is safe to kill or
+        block. Sleeping in small slices keeps shutdown responsive.
+        """
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                break
+            telemetry = monitor.collect()
+            for session in telemetry.get("sessions", []):
+                detector.evaluate(session)
+            if scan_interval <= 0:
+                continue
+            deadline = time.monotonic() + scan_interval
+            while time.monotonic() < deadline:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                time.sleep(0.1)
+
+    scan_thread = threading.Thread(target=behavior_scan, daemon=True)
+    scan_thread.start()
 
     for line in tail_log(log_path):
         if stop_event is not None and stop_event.is_set():
@@ -72,6 +113,8 @@ def run_daemon(
         ):
             firewall.apply_block(ip, duration_seconds=block_seconds)
             firewall.schedule_block_removal(ip, block_seconds)
+
+    scan_thread.join(timeout=1)
 
 
 def main(argv=None):

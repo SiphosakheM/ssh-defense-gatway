@@ -10,6 +10,10 @@ time_window_seconds: 300
 # How long (minutes) a flagged IP is blocked.
 block_duration_minutes: 15
 
+# How often (seconds) the daemon re-scans live sessions with the AI
+# behavioral detector. Optional: when absent the daemon defaults to 30.
+behavior_scan_interval_seconds: 30
+
 # Commands considered suspicious when observed during a session.
 suspicious_commands:
   - sudo

@@ -14,6 +14,18 @@ from core.firewall import FirewallManager
 CHAIN = "SSH_DEFENSE_TEST"
 TEST_IP = "203.0.113.9"
 OTHER_IP = "198.51.100.7"
+BEHAVIOR_CLIENT_IP = "203.0.113.55"
+BEHAVIOR_PID = 314159265
+
+
+def _wait_until(predicate, deadline=10):
+    """Poll ``predicate`` until it holds or the deadline passes."""
+    start = time.monotonic()
+    while time.monotonic() - start < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
 
 
 def _failure_line(ip):
@@ -96,6 +108,142 @@ class RecordingFirewall:
 
     def schedule_block_removal(self, ip, duration_seconds):
         pass
+
+
+class FlaggedMonitor:
+    """Stand-in behavior monitor returning one always-flagged live session."""
+
+    def __init__(self, client_ip=BEHAVIOR_CLIENT_IP):
+        self.client_ip = client_ip
+        self.calls = 0
+
+    def _telemetry(self):
+        return {
+            "collected_at": "2024-01-01T00:00:00+00:00",
+            "sessions": [
+                {
+                    "session_id": f"ssh:{self.client_ip}:4444",
+                    "username": "attacker",
+                    "client_address": self.client_ip,
+                    "processes": [
+                        {
+                            "pid": BEHAVIOR_PID,
+                            "ppid": 1,
+                            "command": "sudo malicious",
+                        }
+                    ],
+                    "command_history": [
+                        {
+                            "pid": BEHAVIOR_PID,
+                            "command": "sudo malicious",
+                            "observed_at": "2024-01-01T00:00:00+00:00",
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def collect(self):
+        self.calls += 1
+        return self._telemetry()
+
+
+def _behavior_config(path, whitelist_ips=None):
+    path.write_text(
+        "max_attempts: 2\n"
+        "time_window_seconds: 300\n"
+        "block_duration_minutes: 15\n"
+        "suspicious_commands: [sudo]\n"
+        "behavior_scan_interval_seconds: 1\n"
+        f"whitelist_ips: {whitelist_ips or []}\n"
+    )
+
+
+def _start_daemon(log_path, config_path, recorder, monitor):
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=main.run_daemon,
+        kwargs={
+            "config_path": str(config_path),
+            "log_path": str(log_path),
+            "chain": CHAIN,
+            "stop_event": stop,
+            "audit_log_path": str(log_path.parent / "audit.log"),
+            "state_path": str(log_path.parent / "defense_state.json"),
+        },
+        daemon=True,
+    )
+    thread.start()
+    return stop, thread
+
+
+def _stop_daemon(stop, thread, log_path):
+    stop.set()
+    with open(log_path, "a") as f:
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_daemon_behavioral_scan_blocks_flagged_client(tmp_path, monkeypatch):
+    """The AI scan loop blocks a live session the ML detector flags."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path)
+
+    recorder = RecordingFirewall()
+    monitor = FlaggedMonitor()
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    monkeypatch.setattr(main, "BehaviorMonitor", lambda **kwargs: monitor)
+
+    stop, thread = _start_daemon(log_path, config_path, recorder, monitor)
+    assert _wait_until(lambda: BEHAVIOR_CLIENT_IP in recorder.blocked_ips)
+    _stop_daemon(stop, thread, log_path)
+
+    with open(log_path.parent / "audit.log") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+    anomalies = [
+        entry for entry in entries if entry["event_type"] == "anomaly"
+    ]
+    assert anomalies
+    assert anomalies[0]["session_id"] == f"ssh:{BEHAVIOR_CLIENT_IP}:4444"
+    assert anomalies[0]["client_address"] == BEHAVIOR_CLIENT_IP
+    assert anomalies[0]["response"]["blocked"] is True
+    assert anomalies[0]["whitelisted"] is False
+    assert "ml_score" in anomalies[0]
+
+
+def test_daemon_behavioral_scan_never_blocks_whitelisted_client(
+    tmp_path, monkeypatch
+):
+    """A whitelisted client survives the AI scan loop untouched."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path, whitelist_ips=[BEHAVIOR_CLIENT_IP])
+
+    recorder = RecordingFirewall()
+    monitor = FlaggedMonitor()
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    monkeypatch.setattr(main, "BehaviorMonitor", lambda **kwargs: monitor)
+
+    stop, thread = _start_daemon(log_path, config_path, recorder, monitor)
+    assert _wait_until(lambda: monitor.calls >= 2)
+    assert recorder.blocked_ips == []
+    _stop_daemon(stop, thread, log_path)
+
+    with open(log_path.parent / "audit.log") as f:
+        entries = [json.loads(line) for line in f if line.strip()]
+    anomalies = [
+        entry for entry in entries if entry["event_type"] == "anomaly"
+    ]
+    assert anomalies
+    assert anomalies[0]["client_address"] == BEHAVIOR_CLIENT_IP
+    assert anomalies[0]["whitelisted"] is True
+    assert anomalies[0]["response"]["blocked"] is False
 
 
 def test_daemon_bypasses_whitelisted_ip(tmp_path, monkeypatch):
