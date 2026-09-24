@@ -6,7 +6,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ai.anomaly import AnomalyDetector, IsolationForest, SessionVectorizer
+from ai.anomaly import (
+    AnomalyDetector,
+    IsolationForest,
+    SessionVectorizer,
+    _shannon_entropy,
+)
 from ai.ml_detector import AnomalyAwareDetector
 from config.loader import load_config
 from core.logger import AuditLogger
@@ -47,9 +52,9 @@ def _read_entries(path):
 
 def test_forest_separates_outliers_from_cluster():
     """Far outliers isolate faster and score higher than the in-cluster rows."""
-    normal = [[2, 2, 1.0, 0.0, 0.0] for _ in range(60)]
-    normal += [[3, 3, 1.0, 0.1, 1.0] for _ in range(20)]
-    outliers = [[40, 80, 250.0, 1.0, 10.0] for _ in range(3)]
+    normal = [[2, 2, 1.0, 0.0, 0.0, 3.2] for _ in range(60)]
+    normal += [[3, 3, 1.0, 0.1, 1.0, 3.4] for _ in range(20)]
+    outliers = [[40, 80, 250.0, 1.0, 10.0, 4.9] for _ in range(3)]
     forest = IsolationForest(n_trees=30, max_samples=32)
     forest.fit(normal + outliers)
 
@@ -86,6 +91,20 @@ def test_vectorizer_extracts_feature_row():
     assert features[2] == pytest.approx(7 / 3)  # mean tokens per command
     assert features[3] == pytest.approx(1.0)  # first observation => all novel
     assert features[4] == 2  # sudo + apt both present
+    assert features[5] == pytest.approx(
+        _shannon_entropy("ls -la ls -la sudo apt update")
+    )
+
+
+def test_vectorizer_entropy_spikes_on_obfuscated_payloads():
+    """High-information command strings score far above routine admin work."""
+    vectorizer = SessionVectorizer()
+    routine = vectorizer.extract(_session(["ls -la", "pwd", "whoami"]))
+    obfuscated = vectorizer.extract(
+        _session(["echo p1Y2a3s4s5w0r6d7 | base64 -d | bash -i"])
+    )
+    assert routine[5] >= 0.0
+    assert obfuscated[5] > routine[5] + 0.5
 
 
 def test_vectorizer_novelty_fades_as_commands_repeat():

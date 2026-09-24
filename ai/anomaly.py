@@ -9,8 +9,8 @@ The pipeline has three cooperating pieces:
 
 - ``SessionVectorizer`` turns a live session into a fixed-width feature
   vector (distinct command count, process count, average tokens per
-  command, novelty versus the user's past commands, and hits against the
-  rule baseline).
+  command, novelty versus the user's past commands, command-string
+  entropy, and hits against the rule baseline).
 - ``IsolationForest`` isolates outliers with random hyperplane splits;
   anomaly score is the standard 2 ** (-avg_path / c(n)) in [0, 1].
 - ``AnomalyDetector`` keeps a bounded per-user memory of recent feature
@@ -24,7 +24,7 @@ system calls other than a bounded re-train when the baseline grows.
 
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 _EULER_GAMMA = 0.5772156649015328606
 
@@ -34,6 +34,7 @@ FEATURE_NAMES = (
     "avg_tokens",
     "novelty_ratio",
     "suspicious_tokens",
+    "command_entropy",
 )
 
 
@@ -44,6 +45,25 @@ def _avg_path_length(size):
     return (
         2.0 * (math.log(size - 1) + _EULER_GAMMA)
         - 2.0 * (size - 1) / size
+    )
+
+
+def _shannon_entropy(text):
+    """Shannon entropy in bits per character of a command string.
+
+    Obfuscated or conspicuously random payloads (embedded base64, hex
+    blobs, string-chained commands) carry far more per-character
+    information than routine ``ls``/``pwd`` admin work, so this feature
+    separates scripted packers from ordinary shells without needing a
+    blocklist of tool names.
+    """
+    counts = Counter(text or "")
+    total = len(text or "")
+    if total == 0:
+        return 0.0
+    return -sum(
+        (count / total) * math.log2(count / total)
+        for count in counts.values()
     )
 
 
@@ -151,8 +171,10 @@ class SessionVectorizer:
 
     ``novelty_ratio`` is computed against the per-user vocabulary of
     commands seen so far, so the same commands quickly become "normal"
-    while never-before-seen ones push the score up. The rule baseline
-    (``suspicious_commands``) remains one feature so both signals mix.
+    while never-before-seen ones push the score up. ``command_entropy``
+    measures the character-level information of the commands, catching
+    obfuscated payloads. The rule baseline (``suspicious_commands``)
+    remains one feature so both signals mix.
     """
 
     def __init__(self, suspicious_commands=()):
@@ -195,6 +217,7 @@ class SessionVectorizer:
             avg_tokens,
             novelty,
             suspicious,
+            _shannon_entropy(" ".join(commands)),
         ]
 
 
