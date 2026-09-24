@@ -4,8 +4,10 @@
 a lightweight isolation-forest layer: a session is now flagged when
 either the classic suspicious-binary score meets its threshold *or* the
 machine-learning model judges the session an outlier against the user's
-own command baseline. The mitigation path (process kill + firewall block,
-whitelist protection, audit trail) is reused unchanged.
+own command baseline, *or* the session deviates from the persisted
+``BaselineProfile`` learned in training mode. The mitigation path
+(process kill + firewall block, whitelist protection, audit trail) is
+reused unchanged.
 """
 
 from ai.anomaly import AnomalyDetector
@@ -22,6 +24,7 @@ class AnomalyAwareDetector(BehaviorDetector):
         firewall=None,
         logger=None,
         whitelist=None,
+        baseline=None,
         ml_enabled=True,
         anomaly_threshold=0.72,
         forest_trees=16,
@@ -36,6 +39,7 @@ class AnomalyAwareDetector(BehaviorDetector):
             firewall=firewall,
             logger=logger,
             whitelist=whitelist,
+            baseline=baseline,
         )
         self.ml_enabled = ml_enabled
         self.anomaly_threshold = anomaly_threshold
@@ -50,13 +54,16 @@ class AnomalyAwareDetector(BehaviorDetector):
         self._last_assessment = None
 
     @classmethod
-    def from_config(cls, config, firewall=None, logger=None, whitelist=None):
+    def from_config(
+        cls, config, firewall=None, logger=None, whitelist=None, baseline=None
+    ):
         """Build the detector from a loaded config, honouring optional tuning keys."""
         return cls(
             suspicious_commands=config.get("suspicious_commands"),
             firewall=firewall,
             logger=logger,
             whitelist=whitelist,
+            baseline=baseline,
             ml_enabled=bool(config.get("anomaly_enabled", True)),
             anomaly_threshold=float(config.get("anomaly_threshold", 0.72)),
             forest_trees=int(config.get("anomaly_forest_trees", 16)),
@@ -78,19 +85,27 @@ class AnomalyAwareDetector(BehaviorDetector):
     def evaluate(self, session):
         """Trigger the response when the rule score or the ML model fires.
 
-        The return value stays the classic rule score for parity with
-        ``BehaviorDetector``; the full ML picture is on
+        A third signal is added on top of the classic rule score and the
+        isolation forest: the trained ``BaselineProfile`` from training
+        mode. The return value stays the classic rule score for parity
+        with ``BehaviorDetector``; the full ML picture is on
         ``last_assessment``.
         """
         rule_score = super().score_session(session)
         assessment = self.assess(session)
+        baseline = self.evaluate_baseline(session)
         ml_flagged = bool(
             self.ml_enabled
             and assessment["trained"]
             and assessment["anomaly_score"] is not None
             and assessment["anomaly_score"] >= self.anomaly_threshold
         )
-        if rule_score >= self._score_threshold or ml_flagged:
+        baseline_flagged = bool(baseline and baseline["flagged"])
+        if (
+            rule_score >= self._score_threshold
+            or ml_flagged
+            or baseline_flagged
+        ):
             self.respond(session)
             if self._logger is not None:
                 response = self._last_response or {}
@@ -102,6 +117,14 @@ class AnomalyAwareDetector(BehaviorDetector):
                     threshold=self._score_threshold,
                     ml_score=assessment["anomaly_score"],
                     ml_threshold=self.anomaly_threshold,
+                    baseline_score=(
+                        baseline["z_max"] if baseline is not None else None
+                    ),
+                    baseline_threshold=(
+                        self._baseline.z_threshold
+                        if self._baseline is not None
+                        else None
+                    ),
                     whitelisted=bool(response.get("whitelisted")),
                     response=response,
                 )
