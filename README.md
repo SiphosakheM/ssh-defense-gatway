@@ -12,6 +12,10 @@ for post-login zero-trust security.
   sessions, scores each session's commands against a baseline of suspicious
   binaries (the "AI" detector), and actively kills the session's processes and
   blocks the source IP when the score spikes.
+- **Alert & harden** every observed session is stored to an audit trail (who
+  logged in from where, and what they ran); a confirmed external threat pushes
+  an instant ntfy.sh alert to your phone and tightens the compromised account
+  (GPG-encrypted password rotation, optional sshd lockdown).
 
 ## Architecture
 
@@ -26,6 +30,9 @@ for post-login zero-trust security.
 | `ai/ml_detector.py` | `AnomalyAwareDetector` — combines the rule score with the ML outlier score. |
 | `core/state_manager.py` | Holds the admin whitelist and protects listed IPs from response. |
 | `core/state_store.py` | Mirrors active blocks to `logs/defense_state.json` for restart recovery. |
+| `core/session_store.py` | Persists every observed SSH session as day-structured JSONL plus SQLite rows. |
+| `core/notifier.py` | Pushes ntfy.sh alerts to the operator's phone. |
+| `core/hardening.py` | Rotates compromised passwords and disables sshd password auth on threat. |
 | `config/loader.py` | Loads and validates `config/config.yaml`. |
 | `core/logger.py` | Thread-safe append-only audit logger emitting JSON lines. |
 | `main.py` | Daemon tying log tailing, threat tracking, and blocking together. |
@@ -68,9 +75,77 @@ All thresholds live in `config/config.yaml`:
 | `block_duration_minutes` | How long a flagged IP stays blocked. | `15` |
 | `suspicious_commands` | Binaries the behavioral detector scores against. | `sudo`, `apt`, `python3` |
 | `whitelist_ips` | IPs/CIDRs never blocked or terminated (failsafe). | `127.0.0.1`, `192.168.0.0/16` |
+| `session_audit.enabled` | Master switch for session storing. | `true` |
+| `session_audit.log_dir` | Where per-day JSONL session records land. | `logs/sessions` |
+| `session_audit.sqlite_path` | SQLite copy of the same records, for queries. | `logs/sessions.db` |
+| `session_audit.retention_days` | JSONL archive files older than this are pruned. | `30` |
+| `notifier.enabled` | Master switch for phone alerts. | `true` |
+| `notifier.ntfy_url` | ntfy.sh server or a self-hosted one. | `https://ntfy.sh` |
+| `notifier.ntfy_topic` | Your long, unguessable alert topic (see below). | `(unset)` |
+| `hardening.rotate_password_on_threat` | Rotate a flagged account's password. | `true` |
+| `hardening.gpg_recipient` | Your GPG public-key fingerprint for delivery. | `(unset)` |
+| `hardening.disable_password_auth_on_threat` | Force `PasswordAuthentication no` in sshd. | `false` |
+| `hardening.sshd_config_path` | sshd config edited by the hardening step. | `/etc/ssh/sshd_config` |
 
 The config file is validated on load: missing keys raise `ValueError` and a
-missing file raises `FileNotFoundError`.
+missing file raises `FileNotFoundError`. Every key in the three optional
+blocks above (`session_audit`, `notifier`, `hardening`) is read with a
+fallback default, so an older config without them still loads untouched.
+
+## Session audit trail
+
+Every session the behavioral scanner observes is recorded twice, so you can
+always reconstruct *who* logged in, *from where*, and *what they ran*:
+
+- **JSONL archive** — one JSON line per meaningful event in
+  `logs/sessions/YYYY-MM-DD.jsonl` (human-greppable, pruned after
+  `session_audit.retention_days`).
+- **SQLite copy** — the same record in `logs/sessions.db` for programmatic
+  queries via `SessionStore.recent_sessions()`.
+
+A record carries the `session_id`, `username`, `client_address`, the full
+command history (with per-command timestamps), the threat score, the ML
+anomaly score, whether the session was flagged, and the mitigation applied.
+Long-lived shells are only re-recorded when their commands actually change or
+when they get flagged, so the trail shows real events rather than one row per
+30-second scan.
+
+## Phone alerts with ntfy.sh
+
+When an external SSH session is flagged, the daemon pushes an instant alert
+to your phone through [ntfy.sh](https://ntfy.sh)'s free pub/sub service — no
+account, no bot tokens:
+
+1. Install the free *ntfy* app on your phone.
+2. Pick a **long, unguessable topic string** (think: a password token).
+3. Subscribe to that topic in the app.
+4. Put the same string in `notifier.ntfy_topic`, then start the daemon.
+
+The alert names the flagged user, the source IP, the commands observed, and
+the threat score. The topic *is* the access token — anyone who knows it can
+see the alerts, so keep it secret and unique. Notifications are best-effort:
+if the network is down the daemon logs `notify_failed` and keeps defending.
+
+## Active hardening on threat
+
+A flagged login triggers more than a firewall drop. In
+`core/hardening.py`, escalating steps close the door the intruder used:
+
+- **Password rotation** (`hardening.rotate_password_on_threat`): the
+  compromised account's password is replaced with a fresh
+  cryptographically-random value via `chpasswd`, so the stolen credential
+  stops working instantly. The new password is encrypted to your GPG key
+  (`hardening.gpg_recipient`) and only the armored, `-----BEGIN PGP MESSAGE
+  -----` blob is pushed to your phone — the plaintext never crosses the
+  messenger. If encryption or delivery fails, the rotation still happens and
+  you are warned to reset the password manually; the plaintext is never sent.
+- **sshd lockdown** (`hardening.disable_password_auth_on_threat`): flips
+  `PasswordAuthentication` to `no` in `sshd_config` and *reloads* (never
+  restarts) sshd, so password-based break-ins are impossible until you
+  re-enable them. Key-based access for legitimate users keeps working.
+
+Both steps require root and degrade gracefully without one another; a failed
+step is recorded in the audit log instead of crashing the daemon.
 
 ## Usage
 
@@ -175,9 +250,13 @@ pgrep -fa "sleep 120|time.sleep\(120\)"     # expect nothing
    descendants into a session snapshot.
 2. `BehaviorDetector.evaluate()` scores the session: every command is matched
    against `suspicious_commands` and each distinct hit adds to the total.
-3. When the score meets the threshold, `respond()` kills every process in the
+3. When the score meets the threshold (rule score, ML outlier score, or
+   learned-baseline deviation), `respond()` kills every process in the
    session and calls `FirewallManager.apply_block()` on the client IP. The
-   mitigation summary is available via the detector's `last_response`.
+   mitigation summary is available via the detector's `last_response`. For a
+   flagged *external* session the daemon then also stores the session in the
+   audit trail, pushes an ntfy.sh alert to your phone, and runs the
+   configured hardening steps for the compromised account.
 
 ### ML anomaly layer
 
@@ -237,6 +316,11 @@ Every active defense measure is permanently recorded as one JSON line in
 | `unblock` | `FirewallManager.remove_block()` | `ip`, `chain` |
 | `kill` | `BehaviorDetector.respond()` | `pid`, `command`, `killed`, `session_id`, `client_address` |
 | `anomaly` | `BehaviorDetector.evaluate()` | `score`, `threshold`, `session_id`, `client_address`, `response` |
+| `notify` / `notify_failed` / `notify_skipped` | `Notifier.send()` | `title`, `topic`, optional `reason` |
+| `password_rotated` | `Hardening` | `username` |
+| `password_rotate_failed` / `password_rotate_skipped` | `Hardening` | `username`, `reason` |
+| `password_encrypt_failed` | `Hardening` | `reason` |
+| `sshd_password_auth_disabled` / `sshd_hardening_failed` | `Hardening` | `path`, optional `reason` |
 
 Each entry is a flat JSON object with a UTC `timestamp` and an `event_type`,
 for example:
