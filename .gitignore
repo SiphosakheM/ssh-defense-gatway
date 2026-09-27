@@ -25,8 +25,10 @@ ENV/
 # Logs
 logs/*.log
 logs/*.out
-logs/defense_state.json
 *.log
+
+# Session audit archive (JSONL day files)
+logs/sessions/
 
 # Editor / OS
 .vscode/
