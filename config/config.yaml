@@ -39,3 +39,30 @@ whitelist_ips:
 # Optional behavior-baseline knobs used by AI training mode (--train).
 # baseline_min_samples: 5     # per-user sessions before the profile yields a score
 # baseline_z_threshold: 2.5   # max |z| across features that flags a session
+
+# Session audit storage: every SSH session the scanner sees is recorded as
+# a JSONL line in log_dir AND as a row in the SQLite file, so you can later
+# query who logged in from where and which commands they ran.
+session_audit:
+  enabled: true
+  log_dir: logs/sessions
+  sqlite_path: logs/sessions.db
+  retention_days: 30
+
+# Phone push notifications through ntfy.sh (free, no account needed).
+# Set ntfy_topic to a long, unguessable string and subscribe to it in the
+# free ntfy app on your phone; alerts then land there instantly.
+notifier:
+  enabled: true
+  ntfy_url: https://ntfy.sh
+  ntfy_topic: ""
+
+# Active lockdown applied to a flagged session's account. Password rotation
+# is only possible once gpg_recipient holds your GPG public key fingerprint;
+# the new password is encrypted to that key and only then pushed to your
+# phone. Password-auth disabling requires root and key-based login to keep.
+hardening:
+  rotate_password_on_threat: true
+  gpg_recipient: ""
+  disable_password_auth_on_threat: false
+  sshd_config_path: /etc/ssh/sshd_config

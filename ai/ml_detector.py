@@ -52,6 +52,7 @@ class AnomalyAwareDetector(BehaviorDetector):
             seed=seed,
         )
         self._last_assessment = None
+        self._last_verdict = None
 
     @classmethod
     def from_config(
@@ -82,6 +83,16 @@ class AnomalyAwareDetector(BehaviorDetector):
         """The most recent ML assessment, or None before the first check."""
         return self._last_assessment
 
+    @property
+    def last_verdict(self):
+        """Why the most recent session was or was not flagged.
+
+        Combines the rule score, the ML outlier score, and the learned
+        baseline into one dict the daemon can hand straight to the audit
+        store, along with whether the whitelist suppressed the response.
+        """
+        return self._last_verdict
+
     def evaluate(self, session):
         """Trigger the response when the rule score or the ML model fires.
 
@@ -89,7 +100,7 @@ class AnomalyAwareDetector(BehaviorDetector):
         isolation forest: the trained ``BaselineProfile`` from training
         mode. The return value stays the classic rule score for parity
         with ``BehaviorDetector``; the full ML picture is on
-        ``last_assessment``.
+        ``last_assessment`` and the combined decision on ``last_verdict``.
         """
         rule_score = super().score_session(session)
         assessment = self.assess(session)
@@ -101,11 +112,12 @@ class AnomalyAwareDetector(BehaviorDetector):
             and assessment["anomaly_score"] >= self.anomaly_threshold
         )
         baseline_flagged = bool(baseline and baseline["flagged"])
-        if (
+        flagged = (
             rule_score >= self._score_threshold
             or ml_flagged
             or baseline_flagged
-        ):
+        )
+        if flagged:
             self.respond(session)
             if self._logger is not None:
                 response = self._last_response or {}
@@ -128,4 +140,14 @@ class AnomalyAwareDetector(BehaviorDetector):
                     whitelisted=bool(response.get("whitelisted")),
                     response=response,
                 )
+        self._last_verdict = {
+            "flagged": flagged,
+            "score": rule_score,
+            "ml_flagged": ml_flagged,
+            "baseline_flagged": baseline_flagged,
+            "threshold": self._score_threshold,
+            "whitelisted": bool(
+                flagged and (self._last_response or {}).get("whitelisted")
+            ),
+        }
         return rule_score

@@ -114,6 +114,39 @@ class RecordingFirewall:
         pass
 
 
+class RecordingStore:
+    """Stand-in session store that keeps everything it is handed."""
+
+    def __init__(self, **kwargs):
+        self.records = []
+
+    def record(self, session, **fields):
+        self.records.append({"session": session, "fields": fields})
+        return True
+
+
+class FakeNotifier:
+    """Stand-in notifier that captures pushes instead of dialing the network."""
+
+    def __init__(self, **kwargs):
+        self.sent = []
+
+    def send(self, title, message, tags=None):
+        self.sent.append((title, message, tags))
+        return True
+
+
+class FakeHardening:
+    """Stand-in hardening that records responses without touching the system."""
+
+    def __init__(self, **kwargs):
+        self.responded = []
+
+    def respond(self, session):
+        self.responded.append(session)
+        return {"password_rotated": False, "password_auth_disabled": False}
+
+
 class FlaggedMonitor:
     """Stand-in behavior monitor returning one always-flagged live session."""
 
@@ -189,6 +222,45 @@ def _stop_daemon(stop, thread, log_path):
         os.fsync(f.fileno())
     thread.join(timeout=5)
     assert thread.is_alive() is False
+
+
+def test_daemon_audits_notifies_and_hardens_flagged_external_session(
+    tmp_path, monkeypatch
+):
+    """A flagged external login is stored, pushed to the phone, and hardened."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path)
+
+    recorder = RecordingFirewall()
+    monitor = FlaggedMonitor()
+    store = RecordingStore()
+    notifier = FakeNotifier()
+    hardening = FakeHardening()
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    monkeypatch.setattr(main, "BehaviorMonitor", lambda **kwargs: monitor)
+    monkeypatch.setattr(main, "SessionStore", lambda **kwargs: store)
+    monkeypatch.setattr(main, "Notifier", lambda **kwargs: notifier)
+    monkeypatch.setattr(main, "Hardening", lambda **kwargs: hardening)
+
+    stop, thread = _start_daemon(log_path, config_path, recorder, monitor)
+
+    def flagged_recorded():
+        return any(r["fields"].get("flagged") for r in store.records)
+
+    assert _wait_until(flagged_recorded)
+    assert _wait_until(lambda: notifier.sent and hardening.responded)
+    _stop_daemon(stop, thread, log_path)
+
+    record = next(r for r in store.records if r["fields"]["flagged"])
+    assert record["session"]["client_address"] == BEHAVIOR_CLIENT_IP
+    assert record["fields"]["threat_score"] == 1
+
+    title, message, _tags = notifier.sent[0]
+    assert title == "SSH threat detected"
+    assert BEHAVIOR_CLIENT_IP in message
+    assert hardening.responded[0]["client_address"] == BEHAVIOR_CLIENT_IP
 
 
 def test_daemon_behavioral_scan_blocks_flagged_client(tmp_path, monkeypatch):

@@ -25,8 +25,11 @@ from ai.detector import BaselineProfile, BehaviorDetector
 from ai.ml_detector import AnomalyAwareDetector
 from config.loader import load_config
 from core.firewall import FirewallManager
+from core.hardening import Hardening
 from core.log_parser import parse_failure, tail_log
 from core.logger import AuditLogger
+from core.notifier import Notifier
+from core.session_store import SessionStore
 from core.state_manager import StateManager
 from core.state_store import DefenseStateStore
 from core.threat_tracker import ThreatTracker
@@ -132,19 +135,116 @@ def run_daemon(
     )
     scan_interval = float(config.get("behavior_scan_interval_seconds", 30))
 
+    store = SessionStore(
+        log_dir=(config.get("session_audit") or {}).get(
+            "log_dir", "logs/sessions"
+        ),
+        sqlite_path=(config.get("session_audit") or {}).get(
+            "sqlite_path", "logs/sessions.db"
+        ),
+        retention_days=int(
+            (config.get("session_audit") or {}).get("retention_days", 30)
+        ),
+    )
+    notifier = Notifier(
+        topic=(config.get("notifier") or {}).get("ntfy_topic"),
+        base_url=(config.get("notifier") or {}).get(
+            "ntfy_url", "https://ntfy.sh"
+        ),
+        logger=audit_logger,
+        enabled=bool((config.get("notifier") or {}).get("enabled", True)),
+    )
+    hardening = Hardening(
+        notifier=notifier,
+        logger=audit_logger,
+        rotate_password=bool(
+            (config.get("hardening") or {}).get(
+                "rotate_password_on_threat", True
+            )
+        ),
+        gpg_recipient=(config.get("hardening") or {}).get("gpg_recipient", ""),
+        disable_password_auth=bool(
+            (config.get("hardening") or {}).get(
+                "disable_password_auth_on_threat", False
+            )
+        ),
+        sshd_config_path=(config.get("hardening") or {}).get(
+            "sshd_config_path", "/etc/ssh/sshd_config"
+        ),
+    )
+
+    def _summarize(session, verdict):
+        """A short human-facing report of a flagged external login."""
+        commands = [
+            process.get("command")
+            for process in session.get("processes", [])
+            if process.get("command")
+        ]
+        preview = "; ".join(commands[:5])
+        if len(commands) > 5:
+            preview += f" (+{len(commands) - 5} more)"
+        return (
+            f"External SSH session flagged.\n"
+            f"user: {session.get('username')}\n"
+            f"source: {session.get('client_address')}\n"
+            f"session: {session.get('session_id')}\n"
+            f"commands: {preview or '(none)'}\n"
+            f"threat score: {verdict.get('score')}"
+        )
+
     def behavior_scan():
         """Periodically score live sessions and respond to AI-flagged ones.
 
         The whitelist failsafe and audit logging are honoured by the
         detector itself, so every evaluated session is safe to kill or
-        block. Sleeping in small slices keeps shutdown responsive.
+        block. Every observed session is persisted to the session store;
+        flagged ones additionally push a phone alert and run the
+        configured hardening steps. Sleeping in small slices keeps
+        shutdown responsive.
         """
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
             telemetry = monitor.collect()
+            collected_at = telemetry.get("collected_at")
             for session in telemetry.get("sessions", []):
                 detector.evaluate(session)
+                verdict = (
+                    getattr(detector, "last_verdict", None) or {}
+                )
+                assessment = (
+                    getattr(detector, "last_assessment", None) or {}
+                )
+                baseline_score = detector.evaluate_baseline(session)
+                flagged = bool(
+                    verdict.get("flagged")
+                    and not verdict.get("whitelisted")
+                )
+                store.record(
+                    session,
+                    collected_at=collected_at,
+                    threat_score=verdict.get("score"),
+                    ml_score=assessment.get("anomaly_score"),
+                    baseline_z=(
+                        (baseline_score or {}).get("z_max")
+                        if baseline_score
+                        else None
+                    ),
+                    flagged=flagged,
+                    mitigation=(
+                        getattr(detector, "last_response", None) or {}
+                        if verdict.get("flagged")
+                        else {}
+                    ),
+                )
+                if not flagged:
+                    continue
+                notifier.send(
+                    "SSH threat detected",
+                    _summarize(session, verdict),
+                    tags=["warning", "ssh"],
+                )
+                hardening.respond(session)
             if scan_interval <= 0:
                 continue
             deadline = time.monotonic() + scan_interval
