@@ -111,6 +111,7 @@ def run_daemon(
         chain=chain,
         logger=audit_logger,
         state_store=state_store,
+        hook_input=True,
     )
     firewall.ensure_chain()
     block_seconds = config["block_duration_minutes"] * 60

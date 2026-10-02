@@ -1,9 +1,11 @@
 """Live iptables firewall management for the SSH Defense Gateway.
 
 Applies and removes DROP rules on a dedicated iptables chain by shelling
-out to the real ``iptables`` binary. Rules live on a custom chain so the
-manager can exercise actual network behaviour without touching the live
-``INPUT``/``OUTPUT`` packet flow.
+out to the real ``iptables`` binary. Rules live on a custom chain so each
+blocked address can be managed independently; when ``hook_input`` is set
+the chain is also jumped to from ``INPUT`` so the rules actually filter
+live traffic. Without that jump the chain is inert — DROP rules would sit
+on a chain nothing ever traverses.
 """
 
 import re
@@ -12,6 +14,7 @@ import threading
 import time
 
 _RULE_RE = re.compile(r"^\s*DROP\s+all\s+--\s+(?P<source>\S+)\s")
+_REFERENCES_RE = re.compile(r"\((?P<count>\d+)\s+references?\)")
 
 
 class FirewallManager:
@@ -23,11 +26,15 @@ class FirewallManager:
         iptables_bin="iptables",
         logger=None,
         state_store=None,
+        hook_input=False,
+        input_chain="INPUT",
     ):
         self.chain = chain
         self.iptables_bin = iptables_bin
         self._logger = logger
         self._state_store = state_store
+        self.hook_input = hook_input
+        self.input_chain = input_chain
 
     def _run(self, *args):
         return subprocess.run(
@@ -37,20 +44,72 @@ class FirewallManager:
         )
 
     def ensure_chain(self):
-        """Create the custom chain if it does not exist yet."""
+        """Create the custom chain and, when hooked, jump to it from INPUT.
+
+        The ``INPUT`` jump is what makes the DROP rules effective; it is
+        inserted idempotently (only once) and is created only when
+        ``hook_input`` is enabled so unit tests can exercise the chain
+        without mutating the live packet path.
+        """
         result = self._run("-L", self.chain, "-n")
-        if result.returncode == 0:
-            return
-        create = self._run("-N", self.chain)
-        if create.returncode != 0:
-            raise RuntimeError(create.stderr.strip())
+        if result.returncode != 0:
+            create = self._run("-N", self.chain)
+            if create.returncode != 0:
+                raise RuntimeError(create.stderr.strip())
+        if self.hook_input:
+            self.ensure_input_hook()
+
+    def ensure_input_hook(self):
+        """Insert the jump from INPUT into the custom chain, once.
+
+        Uses ``iptables -C`` to detect an existing jump so repeated
+        daemon starts do not stack duplicate rules.
+        """
+        if self._run("-C", self.input_chain, "-j", self.chain).returncode == 0:
+            return False
+        result = self._run("-I", self.input_chain, "1", "-j", self.chain)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip())
+        return True
+
+    def remove_input_hook(self):
+        """Delete the INPUT jump, if present. Returns True when removed."""
+        return self._run("-D", self.input_chain, "-j", self.chain).returncode == 0
+
+    def input_hook_exists(self):
+        """True when INPUT currently jumps to the custom chain."""
+        check = self._run("-C", self.input_chain, "-j", self.chain)
+        return check.returncode == 0
+
+    def chain_references(self):
+        """How many rules point at this chain (0 means it is inert).
+
+        ``iptables -L`` prints the reference count in the chain header,
+        which is the cheapest reliable proof that the chain is wired
+        into the live packet path rather than floating unused.
+        """
+        result = self._run("-L", self.chain, "-n")
+        if result.returncode != 0:
+            return 0
+        for line in result.stdout.splitlines():
+            if line.startswith("Chain"):
+                match = _REFERENCES_RE.search(line)
+                if match:
+                    return int(match.group("count"))
+        return 0
 
     def flush_chain(self):
         """Remove all rules from the custom chain."""
         self._run("-F", self.chain)
 
     def drop_chain(self):
-        """Flush and delete the custom chain."""
+        """Unhook, flush, and delete the custom chain.
+
+        The INPUT jump is removed first — ``iptables -X`` refuses to
+        delete a chain that is still referenced, so leaving it would
+        strand both the jump and the chain on the host.
+        """
+        self.remove_input_hook()
         self.flush_chain()
         self._run("-X", self.chain)
 
