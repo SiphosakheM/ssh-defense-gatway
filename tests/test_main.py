@@ -141,10 +141,17 @@ class FakeHardening:
 
     def __init__(self, **kwargs):
         self.responded = []
+        self.verdicts = []
+        self.outcome = {
+            "password_rotated": False,
+            "password_auth_disabled": False,
+            "suppressed": False,
+        }
 
-    def respond(self, session):
+    def respond(self, session, verdict=None):
         self.responded.append(session)
-        return {"password_rotated": False, "password_auth_disabled": False}
+        self.verdicts.append(verdict)
+        return dict(self.outcome)
 
 
 class FlaggedMonitor:
@@ -261,6 +268,71 @@ def test_daemon_audits_notifies_and_hardens_flagged_external_session(
     assert title == "SSH threat detected"
     assert BEHAVIOR_CLIENT_IP in message
     assert hardening.responded[0]["client_address"] == BEHAVIOR_CLIENT_IP
+
+
+def test_daemon_passes_the_verdict_to_the_hardener(tmp_path, monkeypatch):
+    """The hardener receives the detector's signals to corroborate against.
+
+    Without the verdict it has to fail closed, so every lockdown would be
+    suppressed and the defence would silently never engage.
+    """
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path)
+
+    recorder = RecordingFirewall()
+    store = RecordingStore()
+    hardening = FakeHardening()
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    monkeypatch.setattr(main, "BehaviorMonitor", lambda **kwargs: FlaggedMonitor())
+    monkeypatch.setattr(main, "SessionStore", lambda **kwargs: store)
+    monkeypatch.setattr(main, "Notifier", lambda **kwargs: FakeNotifier())
+    monkeypatch.setattr(main, "Hardening", lambda **kwargs: hardening)
+
+    stop, thread = _start_daemon(log_path, config_path, recorder, FlaggedMonitor())
+
+    assert _wait_until(lambda: hardening.verdicts)
+    _stop_daemon(stop, thread, log_path)
+
+    verdict = hardening.verdicts[0]
+    assert verdict["flagged"] is True
+    assert verdict["score"] == 1
+    assert "ml_flagged" in verdict
+    assert "baseline_flagged" in verdict
+
+
+def test_daemon_records_hardening_outcome_in_the_audit_trail(
+    tmp_path, monkeypatch
+):
+    """The stored mitigation shows whether the lockdown actually ran."""
+    log_path = tmp_path / "auth.log"
+    log_path.write_text("")
+    config_path = tmp_path / "config.yaml"
+    _behavior_config(config_path)
+
+    recorder = RecordingFirewall()
+    store = RecordingStore()
+    hardening = FakeHardening()
+    hardening.outcome = {
+        "password_rotated": False,
+        "password_auth_disabled": False,
+        "suppressed": True,
+    }
+    monkeypatch.setattr(main, "FirewallManager", lambda **kwargs: recorder)
+    monkeypatch.setattr(main, "BehaviorMonitor", lambda **kwargs: FlaggedMonitor())
+    monkeypatch.setattr(main, "SessionStore", lambda **kwargs: store)
+    monkeypatch.setattr(main, "Notifier", lambda **kwargs: FakeNotifier())
+    monkeypatch.setattr(main, "Hardening", lambda **kwargs: hardening)
+
+    stop, thread = _start_daemon(log_path, config_path, recorder, FlaggedMonitor())
+
+    assert _wait_until(lambda: hardening.responded)
+    _stop_daemon(stop, thread, log_path)
+
+    flagged = [r for r in store.records if r["fields"].get("flagged")]
+    assert flagged
+    assert flagged[0]["fields"]["mitigation"]["suppressed"] is True
 
 
 def test_daemon_behavioral_scan_blocks_flagged_client(tmp_path, monkeypatch):

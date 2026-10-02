@@ -61,8 +61,18 @@ notifier:
 # is only possible once gpg_recipient holds your GPG public key fingerprint;
 # the new password is encrypted to that key and only then pushed to your
 # phone. Password-auth disabling requires root and key-based login to keep.
+#
+# These steps destroy credentials and rewrite sshd_config, so they are not
+# run on a single weak detection. By default the lockdown requires
+# corroboration: either the rule score reaches strong_rule_score on its own
+# (sustained suspicious activity), or the ML model and the learned baseline
+# both flag the session. A single ordinary `python3` command scores 1 and
+# therefore never triggers a lockdown. Alerts are unaffected either way.
+# Set require_corroboration to false only if you accept that risk.
 hardening:
   rotate_password_on_threat: true
   gpg_recipient: ""
   disable_password_auth_on_threat: false
   sshd_config_path: /etc/ssh/sshd_config
+  require_corroboration: true
+  strong_rule_score: 3

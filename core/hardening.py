@@ -16,6 +16,12 @@ through. The enabled steps are:
 Every step is rooted: writing a password or touching sshd requires root,
 and each action degrades gracefully (logs, notifies, and moves on) so one
 failed tool never blocks the others.
+
+Because these steps are destructive and hard to undo, they do not run on a
+single weak detection. ``should_harden`` requires corroborated evidence —
+a high rule score on its own, or two independent signals agreeing — so an
+ordinary command that trips the suspicious-binary rule cannot lock out a
+legitimate user. Alerting is unaffected; only the lockdown is gated.
 """
 
 import secrets
@@ -40,6 +46,8 @@ class Hardening:
         disable_password_auth=False,
         sshd_config_path="/etc/ssh/sshd_config",
         runner=None,
+        require_corroboration=True,
+        strong_rule_score=3,
     ):
         self._notifier = notifier
         self._logger = logger
@@ -48,6 +56,8 @@ class Hardening:
         self._disable_password_auth = disable_password_auth
         self._sshd_config_path = sshd_config_path
         self._run = runner or (lambda args, **kw: subprocess.run(args, **kw))
+        self._require_corroboration = require_corroboration
+        self._strong_rule_score = strong_rule_score
 
     def _record(self, event_type, **payload):
         """Mirror a hardening action into the audit trail when one exists."""
@@ -217,17 +227,71 @@ class Hardening:
                 return True
         return False
 
-    def respond(self, session):
+    def should_harden(self, verdict):
+        """Decide whether a verdict justifies the destructive lockdown steps.
+
+        Killing a process and dropping an IP are cheap and reversible, but
+        rotating an account's password and rewriting ``sshd_config`` are
+        not: a false positive locks out a legitimate administrator. Those
+        steps therefore only run on corroborated evidence — either the rule
+        score is high on its own, which means sustained suspicious activity,
+        or two independent behavioural signals agree the session is an
+        outlier.
+
+        A lone weak signal is deliberately not enough. One ordinary
+        ``python3`` command already scores 1 against the default threshold,
+        so without this gate routine work by any legitimate user would
+        destroy their own credentials.
+
+        Returns ``(allowed, reason)`` so callers can audit the decision.
+        """
+        if not self._require_corroboration:
+            return True, "corroboration disabled by configuration"
+        if verdict is None:
+            return False, "no verdict available to corroborate"
+        score = verdict.get("score") or 0
+        if score >= self._strong_rule_score:
+            return True, (
+                f"rule score {score} at or above strong threshold "
+                f"{self._strong_rule_score}"
+            )
+        ml_flagged = bool(verdict.get("ml_flagged"))
+        baseline_flagged = bool(verdict.get("baseline_flagged"))
+        if ml_flagged and baseline_flagged:
+            return True, "ML and learned-baseline signals agree"
+        return False, (
+            "single uncorroborated signal "
+            f"(score={score}, ml_flagged={ml_flagged}, "
+            f"baseline_flagged={baseline_flagged})"
+        )
+
+    def respond(self, session, verdict=None):
         """Run every enabled hardening step and summarize the outcome.
 
-        ``session`` must include a ``username`` for password rotation.
-        Returns a dict mapping each step name to whether it happened, so
-        callers can audit the response path.
+        ``session`` must include a ``username`` for password rotation, and
+        ``verdict`` is the detector's decision dict used to corroborate it.
+        Returns a dict mapping each step name to whether it happened, plus
+        ``suppressed`` when the evidence was too weak to act on.
         """
+        if self._require_corroboration:
+            allowed, reason = self.should_harden(verdict)
+            if not allowed:
+                self._record(
+                    "hardening_suppressed",
+                    username=session.get("username"),
+                    client_address=session.get("client_address"),
+                    reason=reason,
+                )
+                return {
+                    "password_rotated": False,
+                    "password_auth_disabled": False,
+                    "suppressed": True,
+                }
         username = session.get("username")
         return {
             "password_rotated": bool(
                 username and self.rotate_user_password(username)
             ),
             "password_auth_disabled": self.disable_password_authentication(),
+            "suppressed": False,
         }

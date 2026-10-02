@@ -172,6 +172,12 @@ def run_daemon(
         sshd_config_path=(config.get("hardening") or {}).get(
             "sshd_config_path", "/etc/ssh/sshd_config"
         ),
+        require_corroboration=bool(
+            (config.get("hardening") or {}).get("require_corroboration", True)
+        ),
+        strong_rule_score=int(
+            (config.get("hardening") or {}).get("strong_rule_score", 3)
+        ),
     )
 
     def _summarize(session, verdict):
@@ -192,6 +198,19 @@ def run_daemon(
             f"commands: {preview or '(none)'}\n"
             f"threat score: {verdict.get('score')}"
         )
+
+    def _alert_and_harden(session, verdict):
+        """Notify the operator, then harden if the verdict is corroborated.
+
+        The alert always fires so nothing is hidden from the operator; the
+        destructive steps are gated separately by the hardener itself.
+        """
+        notifier.send(
+            "SSH threat detected",
+            _summarize(session, verdict),
+            tags=["warning", "ssh"],
+        )
+        return hardening.respond(session, verdict=verdict)
 
     def behavior_scan():
         """Periodically score live sessions and respond to AI-flagged ones.
@@ -221,6 +240,15 @@ def run_daemon(
                     verdict.get("flagged")
                     and not verdict.get("whitelisted")
                 )
+                # The lockdown runs before auditing so the stored mitigation
+                # reflects whether it was actually carried out.
+                outcome = (
+                    _alert_and_harden(session, verdict)
+                    if flagged
+                    else {"password_rotated": False,
+                          "password_auth_disabled": False,
+                          "suppressed": False}
+                )
                 store.record(
                     session,
                     collected_at=collected_at,
@@ -233,19 +261,15 @@ def run_daemon(
                     ),
                     flagged=flagged,
                     mitigation=(
-                        getattr(detector, "last_response", None) or {}
-                        if verdict.get("flagged")
-                        else {}
+                        outcome
+                        if flagged
+                        else (
+                            getattr(detector, "last_response", None) or {}
+                            if verdict.get("flagged")
+                            else {}
+                        )
                     ),
                 )
-                if not flagged:
-                    continue
-                notifier.send(
-                    "SSH threat detected",
-                    _summarize(session, verdict),
-                    tags=["warning", "ssh"],
-                )
-                hardening.respond(session)
             if scan_interval <= 0:
                 continue
             deadline = time.monotonic() + scan_interval
